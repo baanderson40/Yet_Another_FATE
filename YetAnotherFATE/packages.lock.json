@@ -14,12 +14,6 @@
         "resolved": "1.2.39",
         "contentHash": "fcFN01tDTIQqDuTwr1jUQK/geofiwjG5DycJQOnC72i1SsLAk1ELe+apBOuZ11UMQG8YKFZG1FgvjZPbqHyatg=="
       },
-      "ImGui.NET": {
-        "type": "Direct",
-        "requested": "[1.89.7.1, )",
-        "resolved": "1.89.7.1",
-        "contentHash": "e7hAn3Jq4uoiAeQMmxAu9jkdSJnGR74qO1HNVF7wwIq7g6H9tBIDWke72sHbwGOXpZtL1/S678dR5j7VbDzt9A=="
-      },
       "Microsoft.Extensions.DependencyInjection": {
         "type": "Direct",
         "requested": "[8.0.0, )",
