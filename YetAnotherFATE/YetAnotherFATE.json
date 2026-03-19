@@ -1,0 +1,12 @@
+{
+  "Author": "YetAnotherFATE Team",
+  "Name": "Yet Another FATE",
+  "Punchline": "Bootstrap for the future fate automation plugin.",
+  "Description": "Slash command: /yafate. Currently just the template UI.",
+  "ApplicableVersion": "any",
+  "Tags": [
+    "fate",
+    "automation",
+    "template"
+  ]
+}
