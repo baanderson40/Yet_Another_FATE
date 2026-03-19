@@ -1,3 +1,4 @@
+using System;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using YetAnotherFATE.Windows;

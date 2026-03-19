@@ -5,8 +5,13 @@ using Dalamud.Plugin.Services;
 using Microsoft.Extensions.DependencyInjection;
 using YetAnotherFATE.Commands;
 using YetAnotherFATE.Config;
+using YetAnotherFATE.Chains;
+using YetAnotherFATE.Modules.Automator;
 using YetAnotherFATE.Modules.Ux;
 using YetAnotherFATE.Renderers;
+using YetAnotherFATE.Services.Fates;
+using YetAnotherFATE.Services.Movement;
+using YetAnotherFATE.Services.Zone;
 using YetAnotherFATE.Windows;
 
 namespace YetAnotherFATE;
@@ -20,6 +25,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
+    [PluginService] internal static IFramework Framework { get; private set; } = null!;
 
     public Configuration Configuration { get; }
     public WindowSystem WindowSystem { get; } = new("YetAnotherFATE");
@@ -27,6 +33,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ServiceProvider serviceProvider;
     private readonly IMainCommand mainCommand;
     private readonly UxModule uxModule;
+    private readonly AutomatorModule automatorModule;
 
     public Plugin()
     {
@@ -36,6 +43,9 @@ public sealed class Plugin : IDalamudPlugin
         var services = new ServiceCollection();
         BootstrapServices(services);
         serviceProvider = services.BuildServiceProvider();
+
+        automatorModule = serviceProvider.GetRequiredService<AutomatorModule>();
+        automatorModule.Initialize();
 
         uxModule = serviceProvider.GetRequiredService<UxModule>();
         uxModule.Initialize();
@@ -50,6 +60,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         mainCommand.Dispose();
         uxModule.Dispose();
+        automatorModule.Dispose();
         serviceProvider.Dispose();
     }
 
@@ -65,14 +76,22 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton(PlayerState);
         services.AddSingleton(DataManager);
         services.AddSingleton(Log);
+        services.AddSingleton(Framework);
 
         services.AddSingleton<ConfigWindow>();
         services.AddSingleton<MainRenderer>();
         services.AddSingleton<MainWindow>();
 
         services.AddSingleton<UxModule>();
+        services.AddSingleton<AutomatorModule>();
+        services.AddSingleton<AutomatorChain>();
 
         services.AddSingleton<IMainCommandDelegate, MainCommandDelegate>();
         services.AddSingleton<IMainCommand, MainCommand>();
+
+        services.AddSingleton<IFateRepository, FateRepository>();
+        services.AddSingleton<IFateSelector, FateSelector>();
+        services.AddSingleton<IZoneService, ZoneService>();
+        services.AddSingleton<IMovementService, MovementService>();
     }
 }
