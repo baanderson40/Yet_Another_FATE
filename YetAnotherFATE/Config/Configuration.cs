@@ -1,6 +1,7 @@
 using Dalamud.Configuration;
 using Dalamud.Plugin;
 using System;
+using System.Collections.Generic;
 
 namespace YetAnotherFATE.Config;
 
@@ -11,6 +12,8 @@ public class Configuration : IPluginConfiguration
 
     public bool IsConfigWindowMovable { get; set; } = true;
     public bool SomePropertyToBeSavedAndWithADefault { get; set; } = true;
+    public bool AutomatorEnabled { get; set; } = false;
+    public List<uint> FateBlacklist { get; set; } = new();
 
     [NonSerialized]
     private IDalamudPluginInterface? pluginInterface;

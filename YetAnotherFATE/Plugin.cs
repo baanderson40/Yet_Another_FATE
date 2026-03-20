@@ -12,6 +12,7 @@ using YetAnotherFATE.Renderers;
 using YetAnotherFATE.Services.Fates;
 using YetAnotherFATE.Services.Movement;
 using YetAnotherFATE.Services.Zone;
+using YetAnotherFATE.Services.Travel;
 using YetAnotherFATE.Windows;
 
 namespace YetAnotherFATE;
@@ -26,6 +27,9 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
+    [PluginService] internal static IFateTable FateTable { get; private set; } = null!;
+    [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
+    [PluginService] internal static IChatGui ChatGui { get; private set; } = null!;
 
     public Configuration Configuration { get; }
     public WindowSystem WindowSystem { get; } = new("YetAnotherFATE");
@@ -77,6 +81,9 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton(DataManager);
         services.AddSingleton(Log);
         services.AddSingleton(Framework);
+        services.AddSingleton(FateTable);
+        services.AddSingleton(ObjectTable);
+        services.AddSingleton(ChatGui);
 
         services.AddSingleton<ConfigWindow>();
         services.AddSingleton<MainRenderer>();
@@ -89,9 +96,20 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton<IMainCommandDelegate, MainCommandDelegate>();
         services.AddSingleton<IMainCommand, MainCommand>();
 
-        services.AddSingleton<IFateRepository, FateRepository>();
-        services.AddSingleton<IFateSelector, FateSelector>();
+        services.AddSingleton<IFateRepository>(provider => new FateRepository(
+            provider.GetRequiredService<IClientState>(),
+            provider.GetRequiredService<IPlayerState>(),
+            provider.GetRequiredService<IObjectTable>(),
+            provider.GetRequiredService<IFateTable>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<IFateDebugReporter, FateDebugReporter>();
+        services.AddSingleton<IFateSelector>(provider => new FateSelector(
+            provider.GetRequiredService<IPlayerState>(),
+            provider.GetRequiredService<ITeleportAdvisor>(),
+            provider.GetRequiredService<Configuration>(),
+            provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<IZoneService, ZoneService>();
         services.AddSingleton<IMovementService, MovementService>();
+        services.AddSingleton<ITeleportAdvisor, TeleportAdvisor>();
     }
 }

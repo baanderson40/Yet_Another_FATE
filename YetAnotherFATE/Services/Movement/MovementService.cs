@@ -9,6 +9,10 @@ public sealed class MovementService(IPluginLog log) : IMovementService
 
     public void NavigateTo(FateSelection selection)
     {
-        log.Debug($"Placeholder movement request for fate {selection.Fate.FateId} ({selection.Fate.Name}).");
+        log.Debug("MovementService: would {Mode} toward fate {FateId} ({Name}) reason={Reason}",
+            selection.ShouldTeleport ? "teleport" : "run",
+            selection.Fate.FateId,
+            selection.Fate.Name,
+            selection.Reason);
     }
 }
