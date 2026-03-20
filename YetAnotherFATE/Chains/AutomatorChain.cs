@@ -1,7 +1,8 @@
 using YetAnotherFATE.Services.Fates;
-using YetAnotherFATE.Services.Movement;
 using Dalamud.Plugin.Services;
 using YetAnotherFATE.Config;
+using YetAnotherFATE.Services.Travel;
+using YetAnotherFATE.Data.Travel;
 
 namespace YetAnotherFATE.Chains;
 
@@ -9,20 +10,20 @@ public sealed class AutomatorChain
 {
     private readonly IFateRepository fateRepository;
     private readonly IFateSelector fateSelector;
-    private readonly IMovementService movementService;
+    private readonly ITravelController travelController;
     private readonly IPluginLog log;
     private readonly Configuration configuration;
 
     public AutomatorChain(
         IFateRepository fateRepository,
         IFateSelector fateSelector,
-        IMovementService movementService,
+        ITravelController travelController,
         IPluginLog log,
         Configuration configuration)
     {
         this.fateRepository = fateRepository;
         this.fateSelector = fateSelector;
-        this.movementService = movementService;
+        this.travelController = travelController;
         this.log = log;
         this.configuration = configuration;
     }
@@ -31,6 +32,7 @@ public sealed class AutomatorChain
     {
         if (!configuration.AutomatorEnabled)
         {
+            travelController.Cancel("Automator disabled", TravelRequestKind.Automatic);
             return;
         }
 
@@ -38,6 +40,7 @@ public sealed class AutomatorChain
         if (fates.Count == 0)
         {
             log.Debug("AutomatorChain: No active fates detected this tick.");
+            travelController.Cancel("No active fates", TravelRequestKind.Automatic);
             return;
         }
 
@@ -45,12 +48,10 @@ public sealed class AutomatorChain
         if (selection == null)
         {
             log.Debug("AutomatorChain: Selector did not return a candidate.");
+            travelController.Cancel("No candidate from selector", TravelRequestKind.Automatic);
             return;
         }
 
-        log.Debug("AutomatorChain: Selected fate {FateId} ({Name}) distance={Distance:F0}y score={Score:F1}", selection.Value.Fate.FateId, selection.Value.Fate.Name, selection.Value.Fate.DistanceFromPlayer, selection.Value.Score);
-        log.Debug("AutomatorChain: Teleport decision => {Decision} ({Reason})", selection.Value.ShouldTeleport ? "TELEPORT" : "RUN", selection.Value.Teleport.Reason);
-
-        movementService.NavigateTo(selection.Value);
+        travelController.RequestTravel(selection.Value);
     }
 }

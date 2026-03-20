@@ -86,7 +86,6 @@ public sealed class FateRepository : IFateRepository
                 timeRemaining));
         }
 
-        log.Debug("FateRepository: Enumerated {Count} fates in territory {TerritoryId}", results.Count, clientState.TerritoryType);
         return results;
     }
 

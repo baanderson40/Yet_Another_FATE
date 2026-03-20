@@ -41,13 +41,11 @@ public sealed class FateSelector : IFateSelector
         {
             if (configuration.FateBlacklist?.Contains(fate.FateId) == true)
             {
-                log.Debug("FateSelector: Skipping fate {FateId} (blacklisted)", fate.FateId);
                 continue;
             }
 
             if (fate.TimeRemaining.TotalSeconds <= 20)
             {
-                log.Debug("FateSelector: Skipping fate {FateId} ({Name}) due to low remaining time ({Seconds:F0}s)", fate.FateId, fate.Name, fate.TimeRemaining.TotalSeconds);
                 continue;
             }
 
@@ -67,15 +65,6 @@ public sealed class FateSelector : IFateSelector
                     string.Join(", ", reasons),
                     teleport);
             }
-        }
-
-        if (best != null)
-        {
-            log.Debug("FateSelector: Selected fate {FateId} score={Score:F1} reasons={Reasons}", best.Value.Fate.FateId, best.Value.Score, best.Value.Reason);
-        }
-        else
-        {
-            log.Debug("FateSelector: No eligible fates after scoring.");
         }
 
         return best;
@@ -117,7 +106,7 @@ public sealed class FateSelector : IFateSelector
         else
         {
             score -= 15;
-            reasons.Add("run");
+            reasons.Add($"run:{teleport.Reason}");
         }
 
         if (fate.IsContinuation)

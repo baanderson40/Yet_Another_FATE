@@ -6,5 +6,11 @@ public readonly record struct TeleportRecommendation(
     string Reason,
     float DirectDistance,
     float EstimatedRunDistance,
-    float EstimatedTeleportDistance
+    float EstimatedTeleportDistance,
+    float RunTimeSeconds,
+    float TeleportTimeSeconds,
+    uint EstimatedGilCost,
+    bool UsesFavouriteAetheryte,
+    string? AetheryteName,
+    byte SubIndex
 );

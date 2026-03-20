@@ -1,4 +1,6 @@
-﻿using Dalamud.IoC;
+﻿using Dalamud.Game.ClientState.Aetherytes;
+using Dalamud.Game.ClientState.Conditions;
+using Dalamud.IoC;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -30,6 +32,8 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IFateTable FateTable { get; private set; } = null!;
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
     [PluginService] internal static IChatGui ChatGui { get; private set; } = null!;
+    [PluginService] internal static IAetheryteList AetheryteList { get; private set; } = null!;
+    [PluginService] internal static ICondition Condition { get; private set; } = null!;
 
     public Configuration Configuration { get; }
     public WindowSystem WindowSystem { get; } = new("YetAnotherFATE");
@@ -84,6 +88,8 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton(FateTable);
         services.AddSingleton(ObjectTable);
         services.AddSingleton(ChatGui);
+        services.AddSingleton(AetheryteList);
+        services.AddSingleton(Condition);
 
         services.AddSingleton<ConfigWindow>();
         services.AddSingleton<MainRenderer>();
@@ -93,7 +99,16 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton<AutomatorModule>();
         services.AddSingleton<AutomatorChain>();
 
-        services.AddSingleton<IMainCommandDelegate, MainCommandDelegate>();
+        services.AddSingleton<IMainCommandDelegate>(provider => new MainCommandDelegate(
+            provider.GetRequiredService<UxModule>(),
+            provider.GetRequiredService<IFateDebugReporter>(),
+            provider.GetRequiredService<IFateRepository>(),
+            provider.GetRequiredService<IFateSelector>(),
+            provider.GetRequiredService<ITeleportExecutor>(),
+            provider.GetRequiredService<INavmeshClient>(),
+            provider.GetRequiredService<ITravelController>(),
+            provider.GetRequiredService<IChatGui>(),
+            provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<IMainCommand, MainCommand>();
 
         services.AddSingleton<IFateRepository>(provider => new FateRepository(
@@ -108,8 +123,30 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<ITeleportAdvisor>(),
             provider.GetRequiredService<Configuration>(),
             provider.GetRequiredService<IPluginLog>()));
-        services.AddSingleton<IZoneService, ZoneService>();
-        services.AddSingleton<IMovementService, MovementService>();
-        services.AddSingleton<ITeleportAdvisor, TeleportAdvisor>();
+        services.AddSingleton<IZoneService>(provider => new ZoneService(
+            provider.GetRequiredService<IDataManager>(),
+            provider.GetRequiredService<IAetheryteList>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<INavmeshClient>(provider => new NavmeshClient(
+            provider.GetRequiredService<IDalamudPluginInterface>(),
+            provider.GetRequiredService<IFramework>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<ITeleportExecutor>(provider => new TeleportExecutor(
+            provider.GetRequiredService<IClientState>(),
+            provider.GetRequiredService<ICondition>(),
+            provider.GetRequiredService<IFramework>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<ITravelController>(provider => new TravelController(
+            provider.GetRequiredService<ITeleportExecutor>(),
+            provider.GetRequiredService<INavmeshClient>(),
+            provider.GetRequiredService<IClientState>(),
+            provider.GetRequiredService<ICondition>(),
+            provider.GetRequiredService<IObjectTable>(),
+            provider.GetRequiredService<IFramework>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<ITeleportAdvisor>(provider => new TeleportAdvisor(
+            provider.GetRequiredService<IZoneService>(),
+            provider.GetRequiredService<Configuration>(),
+            provider.GetRequiredService<IPluginLog>()));
     }
 }
