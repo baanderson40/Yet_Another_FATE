@@ -6,6 +6,7 @@ using Dalamud.Game.ClientState;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Component.GUI;
 using YetAnotherFATE.Data.Fates;
 using YetAnotherFATE.Data.Travel;
 using YetAnotherFATE.Services.Movement;
@@ -20,6 +21,7 @@ public sealed class TravelController : ITravelController, IDisposable
     private readonly IObjectTable objectTable;
     private readonly ICondition condition;
     private readonly IFramework framework;
+    private readonly IGameGui gameGui;
     private readonly IPluginLog log;
 
     private const uint MountActionId = 9;
@@ -34,6 +36,7 @@ public sealed class TravelController : ITravelController, IDisposable
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan TeleportRetryDelay = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan TeleportCompletionTimeout = TimeSpan.FromSeconds(25);
+    private static readonly TimeSpan WorldReadySettleDelay = TimeSpan.FromMilliseconds(100);
 
     private readonly object jobGate = new();
     private readonly object dismountGate = new();
@@ -52,6 +55,7 @@ public sealed class TravelController : ITravelController, IDisposable
         ICondition condition,
         IObjectTable objectTable,
         IFramework framework,
+        IGameGui gameGui,
         IPluginLog log)
     {
         this.teleportExecutor = teleportExecutor;
@@ -60,6 +64,7 @@ public sealed class TravelController : ITravelController, IDisposable
         this.condition = condition;
         this.objectTable = objectTable;
         this.framework = framework;
+        this.gameGui = gameGui;
         this.log = log;
     }
 
@@ -123,11 +128,6 @@ public sealed class TravelController : ITravelController, IDisposable
 
                 if (competing.Kind == TravelRequestKind.Automatic && kind == TravelRequestKind.Automatic && IsCommittedPhase(phase))
                 {
-                    log.Debug(
-                        "TravelController: ignoring automatic travel request for fate {FateId} while job {JobId} remains in committed phase {Phase}",
-                        selection.Fate.FateId,
-                        competing.JobId,
-                        phase);
                     return;
                 }
 
@@ -197,6 +197,8 @@ public sealed class TravelController : ITravelController, IDisposable
                     FailJob(job.JobId, "World not ready after teleport");
                     return;
                 }
+
+                await Task.Delay(WorldReadySettleDelay, token).ConfigureAwait(false);
             }
 
             token.ThrowIfCancellationRequested();
@@ -213,6 +215,8 @@ public sealed class TravelController : ITravelController, IDisposable
                 FailJob(job.JobId, "World not ready after mounting");
                 return;
             }
+
+            await Task.Delay(WorldReadySettleDelay, token).ConfigureAwait(false);
 
             token.ThrowIfCancellationRequested();
 
@@ -426,7 +430,7 @@ public sealed class TravelController : ITravelController, IDisposable
     {
         while (!token.IsCancellationRequested)
         {
-            if (!condition[ConditionFlag.BetweenAreas])
+            if (!condition[ConditionFlag.BetweenAreas] && IsScreenReady())
             {
                 var position = await TryGetPlayerPositionAsync(token).ConfigureAwait(false);
                 if (position.HasValue)
@@ -475,6 +479,25 @@ public sealed class TravelController : ITravelController, IDisposable
         or TravelPhase.Mounting
         or TravelPhase.Moving
         or TravelPhase.Arriving;
+
+    private unsafe bool IsScreenReady()
+    {
+        return !IsAddonVisible("NowLoading")
+            && !IsAddonVisible("FadeMiddle")
+            && !IsAddonVisible("FadeBack");
+    }
+
+    private unsafe bool IsAddonVisible(string name)
+    {
+        var addonPtr = gameGui.GetAddonByName(name, 0);
+        if (addonPtr.Address != IntPtr.Zero)
+        {
+            var addon = (AtkUnitBase*)addonPtr.Address;
+            return addon != null && addon->IsVisible;
+        }
+
+        return false;
+    }
 
     private async Task MonitorDismountAsync(Vector3 destination, CancellationToken token)
     {
@@ -529,7 +552,7 @@ public sealed class TravelController : ITravelController, IDisposable
         var tcs = new TaskCompletionSource<Vector3?>();
         using var registration = token.Register(() => tcs.TrySetCanceled(token));
 
-        framework.RunOnFrameworkThread(() =>
+        _ = framework.RunOnFrameworkThread(() =>
         {
             try
             {

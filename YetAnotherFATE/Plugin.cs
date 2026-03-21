@@ -32,6 +32,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IFateTable FateTable { get; private set; } = null!;
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
     [PluginService] internal static IChatGui ChatGui { get; private set; } = null!;
+    [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
     [PluginService] internal static IAetheryteList AetheryteList { get; private set; } = null!;
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
 
@@ -88,6 +89,7 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton(FateTable);
         services.AddSingleton(ObjectTable);
         services.AddSingleton(ChatGui);
+        services.AddSingleton(GameGui);
         services.AddSingleton(AetheryteList);
         services.AddSingleton(Condition);
 
@@ -143,6 +145,7 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<ICondition>(),
             provider.GetRequiredService<IObjectTable>(),
             provider.GetRequiredService<IFramework>(),
+            provider.GetRequiredService<IGameGui>(),
             provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<ITeleportAdvisor>(provider => new TeleportAdvisor(
             provider.GetRequiredService<IZoneService>(),
