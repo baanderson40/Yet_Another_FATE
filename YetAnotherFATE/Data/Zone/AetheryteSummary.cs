@@ -8,6 +8,8 @@ public readonly record struct AetheryteSummary(
     string Name,
     uint PlaceNameId,
     Vector3 Position,
+    string PositionSource,
+    bool HasPosition,
     bool IsPrimary,
     byte SubIndex,
     uint GilCost,

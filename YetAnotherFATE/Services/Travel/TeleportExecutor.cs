@@ -81,7 +81,7 @@ public sealed unsafe class TeleportExecutor : ITeleportExecutor, IDisposable
         }
 
         pending = recommendation;
-        startingTerritory = clientState.TerritoryType;
+        startingTerritory = checked((ushort)clientState.TerritoryType);
         issuedAt = DateTimeOffset.UtcNow;
         TransitionState(TeleportState.Starting);
 

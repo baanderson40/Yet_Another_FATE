@@ -30,13 +30,30 @@ public sealed class TravelController : ITravelController, IDisposable
     private const float DismountDistance = 20f;
     private const float DefaultArrivalRadius = 12f;
     private const int NavmeshMaxAttempts = 3;
+    private static readonly ConditionFlag[] TeleportBlockingFlags =
+    {
+        ConditionFlag.BetweenAreas,
+        ConditionFlag.BetweenAreas51,
+        ConditionFlag.Jumping,
+        ConditionFlag.Jumping61,
+        ConditionFlag.Occupied,
+        ConditionFlag.OccupiedInEvent,
+        ConditionFlag.OccupiedInQuestEvent,
+        ConditionFlag.InCombat,
+        ConditionFlag.Casting,
+    };
     private static readonly TimeSpan MountAttemptTimeout = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan DismountAttemptTimeout = TimeSpan.FromSeconds(0.2);
+    private static readonly TimeSpan DismountAttemptTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan DismountRetryDelay = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan TeleportRetryDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan TeleportStabilityWindow = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan TeleportReadinessTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan TeleportCompletionTimeout = TimeSpan.FromSeconds(25);
     private static readonly TimeSpan WorldReadySettleDelay = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan WorldReadyTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan TravelTimeout = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan DismountTimeout = TimeSpan.FromSeconds(15);
 
     private readonly object jobGate = new();
     private readonly object dismountGate = new();
@@ -47,6 +64,9 @@ public sealed class TravelController : ITravelController, IDisposable
     private Task? jobTask;
     private CancellationTokenSource? dismountCts;
     private Task? dismountMonitorTask;
+    private Guid? navmeshJobId;
+
+    public event EventHandler<TravelPhaseChangedEventArgs>? PhaseChanged;
 
     public TravelController(
         ITeleportExecutor teleportExecutor,
@@ -101,13 +121,15 @@ public sealed class TravelController : ITravelController, IDisposable
         }
     }
 
-    public void RequestTravel(FateSelection selection, TravelRequestKind kind = TravelRequestKind.Automatic)
+    public void RequestTravel(FateSelection selection, TravelRequestKind kind = TravelRequestKind.Automatic, float? arrivalRadius = null)
     {
         lock (jobGate)
         {
-            if (currentJob is { } existing && existing.Selection.Fate.FateId == selection.Fate.FateId && existing.Kind == kind)
+            var requestedRadius = Math.Clamp(arrivalRadius ?? DefaultArrivalRadius, 2f, DefaultArrivalRadius);
+            if (currentJob is { } existing && existing.Selection.Fate.FateId == selection.Fate.FateId && existing.Kind == kind &&
+                Vector3.Distance(existing.Selection.Destination, selection.Destination) < 1f)
             {
-                currentJob = existing with { Selection = selection };
+                currentJob = existing with { Selection = selection, ArrivalRadius = requestedRadius };
                 return;
             }
 
@@ -126,22 +148,27 @@ public sealed class TravelController : ITravelController, IDisposable
                     return;
                 }
 
-                if (competing.Kind == TravelRequestKind.Automatic && kind == TravelRequestKind.Automatic && IsCommittedPhase(phase))
+                if (competing.Kind == TravelRequestKind.Automatic && kind == TravelRequestKind.Automatic &&
+                    IsCommittedPhase(phase) && competing.Selection.Fate.FateId != selection.Fate.FateId)
                 {
                     return;
                 }
 
             }
 
-            if (IsAlreadyWithinArrivalRadius(selection))
+            CancelJobLocked("superseded by new travel job", null);
+            DetachCancelledJobLocked();
+
+            var job = new TravelJob(Guid.NewGuid(), selection, kind, DateTimeOffset.UtcNow, requestedRadius);
+            currentJob = job;
+
+            if (IsAlreadyWithinArrivalRadius(selection, requestedRadius))
             {
+                UpdatePhaseInternal(job.JobId, TravelPhase.Arrived, "Already within arrival radius");
+                currentJob = null;
                 return;
             }
 
-            CancelJobLocked("superseded by new travel job", null);
-
-            var job = new TravelJob(Guid.NewGuid(), selection, kind, DateTimeOffset.UtcNow, DefaultArrivalRadius);
-            currentJob = job;
             UpdatePhaseInternal(TravelPhase.Initializing, $"travel job {job.JobId} targeting {selection.Fate.Name}");
 
             jobCts = new CancellationTokenSource();
@@ -171,9 +198,10 @@ public sealed class TravelController : ITravelController, IDisposable
         }
 
         log.Debug("TravelController: cancelling active job {JobId} reason={Reason}", currentJob.JobId, reason);
+        var jobId = currentJob.JobId;
         jobCts?.Cancel();
-        navmeshClient.Stop();
-        UpdatePhaseInternal(TravelPhase.Cancelled, reason);
+        StopNavmesh(jobId);
+        UpdatePhaseInternal(jobId, TravelPhase.Cancelled, reason);
     }
 
     private async Task ProcessJobAsync(TravelJob job, CancellationToken token)
@@ -184,8 +212,8 @@ public sealed class TravelController : ITravelController, IDisposable
 
             if (job.Kind == TravelRequestKind.Automatic && job.Selection.ShouldTeleport && job.Selection.Teleport.AetheryteId.HasValue)
             {
-                UpdatePhaseInternal(TravelPhase.TeleportQueued, $"teleport target {job.Selection.Teleport.AetheryteName ?? job.Selection.Teleport.AetheryteId.Value.ToString()}");
-                var teleported = await ExecuteTeleportAsync(job.Selection, token).ConfigureAwait(false);
+                UpdatePhaseInternal(job.JobId, TravelPhase.TeleportQueued, $"teleport target {job.Selection.Teleport.AetheryteName ?? job.Selection.Teleport.AetheryteId.Value.ToString()}");
+                var teleported = await ExecuteTeleportAsync(job.JobId, job.Selection, token).ConfigureAwait(false);
                 if (!teleported)
                 {
                     FailJob(job.JobId, "Teleport failed or was blocked");
@@ -203,8 +231,8 @@ public sealed class TravelController : ITravelController, IDisposable
 
             token.ThrowIfCancellationRequested();
 
-            UpdatePhaseInternal(TravelPhase.Mounting, "Ensuring mount");
-            if (!await EnsureMountedAsync(token).ConfigureAwait(false))
+            UpdatePhaseInternal(job.JobId, TravelPhase.Mounting, "Ensuring mount");
+            if (!await EnsureMountedAsync(job.JobId, token).ConfigureAwait(false))
             {
                 FailJob(job.JobId, "Failed to mount after retries");
                 return;
@@ -220,16 +248,17 @@ public sealed class TravelController : ITravelController, IDisposable
 
             token.ThrowIfCancellationRequested();
 
-            UpdatePhaseInternal(TravelPhase.Moving, "Issuing navmesh move");
-            if (!await TryNavmeshMoveAsync(job.Selection.Destination, token).ConfigureAwait(false))
+            UpdatePhaseInternal(job.JobId, TravelPhase.Moving, "Issuing navmesh move");
+            if (!await TryNavmeshMoveAsync(job.JobId, job.Selection.Destination, token).ConfigureAwait(false))
             {
                 FailJob(job.JobId, $"Navmesh move failed ({navmeshClient.Status})");
                 return;
             }
 
-            UpdatePhaseInternal(TravelPhase.Moving, "Navmesh move active");
+            UpdatePhaseInternal(job.JobId, TravelPhase.Moving, "Navmesh move active");
             await MonitorArrivalAsync(job, token).ConfigureAwait(false);
-            UpdatePhaseInternal(TravelPhase.Arrived, "Arrival radius reached");
+            token.ThrowIfCancellationRequested();
+            UpdatePhaseInternal(job.JobId, TravelPhase.Arrived, "Arrival radius reached");
         }
         catch (TaskCanceledException)
         {
@@ -246,7 +275,7 @@ public sealed class TravelController : ITravelController, IDisposable
         }
     }
 
-    private async Task<bool> ExecuteTeleportAsync(FateSelection selection, CancellationToken token)
+    private async Task<bool> ExecuteTeleportAsync(Guid jobId, FateSelection selection, CancellationToken token)
     {
         if (!selection.Teleport.AetheryteId.HasValue)
         {
@@ -256,6 +285,12 @@ public sealed class TravelController : ITravelController, IDisposable
         var attempts = 0;
         while (!token.IsCancellationRequested && attempts < 3)
         {
+            if (!await WaitForTeleportReadinessAsync(token).ConfigureAwait(false))
+            {
+                log.Debug("TravelController: teleport readiness timeout before attempt {Attempt}", attempts + 1);
+                return false;
+            }
+
             if (teleportExecutor.State != TeleportState.Idle)
             {
                 await Task.Delay(TeleportRetryDelay, token).ConfigureAwait(false);
@@ -263,16 +298,25 @@ public sealed class TravelController : ITravelController, IDisposable
                 continue;
             }
 
-            var result = teleportExecutor.RequestTeleport(selection.Teleport);
+            var result = await RunForJobOnFrameworkThreadAsync(
+                jobId,
+                () => teleportExecutor.RequestTeleport(selection.Teleport),
+                token).ConfigureAwait(false);
             log.Debug("TravelController: teleport request attempt {Attempt} => {Result}", attempts + 1, result);
             switch (result)
             {
                 case TeleportRequestResult.Issued:
-                    UpdatePhaseInternal(TravelPhase.Teleporting, "Teleport in progress");
+                    UpdatePhaseInternal(jobId, TravelPhase.Teleporting, "Teleport in progress");
                     var completed = await WaitForTeleportCompletionAsync(token).ConfigureAwait(false);
                     if (!completed)
                     {
                         log.Debug("TravelController: teleport was issued but did not complete successfully");
+                        attempts++;
+                        if (attempts < 3)
+                        {
+                            await Task.Delay(TeleportRetryDelay, token).ConfigureAwait(false);
+                            continue;
+                        }
                     }
                     return completed;
                 case TeleportRequestResult.Busy:
@@ -304,6 +348,7 @@ public sealed class TravelController : ITravelController, IDisposable
     private async Task<bool> WaitForTeleportCompletionAsync(CancellationToken token)
     {
         var elapsed = TimeSpan.Zero;
+        var observedLoading = false;
         while (!token.IsCancellationRequested && elapsed < TeleportCompletionTimeout)
         {
             var state = teleportExecutor.State;
@@ -311,16 +356,29 @@ public sealed class TravelController : ITravelController, IDisposable
             {
                 case TeleportState.Completed:
                     return true;
+                case TeleportState.Loading:
+                    observedLoading = true;
+                    break;
                 case TeleportState.Failed:
                     log.Debug("TravelController: teleport executor entered Failed state");
                     return false;
                 case TeleportState.Idle:
-                    if (!condition[ConditionFlag.BetweenAreas])
+                {
+                    if (!observedLoading)
+                    {
+                        log.Debug("TravelController: teleport returned to Idle before loading began");
+                        return false;
+                    }
+
+                    var betweenAreas = await IsConditionActiveAsync(ConditionFlag.BetweenAreas, token).ConfigureAwait(false);
+                    var betweenAreas51 = await IsConditionActiveAsync(ConditionFlag.BetweenAreas51, token).ConfigureAwait(false);
+                    if (observedLoading && !betweenAreas && !betweenAreas51)
                     {
                         return true;
                     }
 
                     break;
+                }
             }
 
             await Task.Delay(PollInterval, token).ConfigureAwait(false);
@@ -331,9 +389,57 @@ public sealed class TravelController : ITravelController, IDisposable
         return false;
     }
 
-    private async Task<bool> EnsureMountedAsync(CancellationToken token)
+    private async Task<bool> WaitForTeleportReadinessAsync(CancellationToken token)
     {
-        if (condition[ConditionFlag.Mounted])
+        var startedAt = DateTimeOffset.UtcNow;
+        DateTimeOffset? stableSince = null;
+        ConditionFlag? lastBlockingFlag = null;
+
+        while (!token.IsCancellationRequested && DateTimeOffset.UtcNow - startedAt < TeleportReadinessTimeout)
+        {
+            var blockingFlag = await RunOnFrameworkThreadAsync(GetTeleportBlockingFlag, token).ConfigureAwait(false);
+            if (blockingFlag is { } activeFlag)
+            {
+                stableSince = null;
+                if (lastBlockingFlag != activeFlag)
+                {
+                    log.Debug("TravelController: waiting to teleport; blocking condition={Flag}", activeFlag);
+                    lastBlockingFlag = activeFlag;
+                }
+            }
+            else
+            {
+                stableSince ??= DateTimeOffset.UtcNow;
+                if (DateTimeOffset.UtcNow - stableSince.Value >= TeleportStabilityWindow)
+                {
+                    return true;
+                }
+
+                lastBlockingFlag = null;
+            }
+
+            await Task.Delay(PollInterval, token).ConfigureAwait(false);
+        }
+
+        return false;
+    }
+
+    private ConditionFlag? GetTeleportBlockingFlag()
+    {
+        foreach (var flag in TeleportBlockingFlags)
+        {
+            if (condition[flag])
+            {
+                return flag;
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<bool> EnsureMountedAsync(Guid jobId, CancellationToken token)
+    {
+        if (await IsConditionActiveAsync(ConditionFlag.Mounted, token).ConfigureAwait(false))
         {
             return true;
         }
@@ -341,7 +447,7 @@ public sealed class TravelController : ITravelController, IDisposable
         for (var attempt = 0; attempt < MountMaxAttempts && !token.IsCancellationRequested; attempt++)
         {
             log.Debug("TravelController: issuing mount attempt {Attempt}/{Max}", attempt + 1, MountMaxAttempts);
-            TryUseGeneralAction(MountActionId);
+            await TryUseGeneralActionAsync(jobId, MountActionId, token).ConfigureAwait(false);
 
             if (await WaitForConditionAsync(() => condition[ConditionFlag.Mounted], MountAttemptTimeout, token).ConfigureAwait(false))
             {
@@ -352,10 +458,10 @@ public sealed class TravelController : ITravelController, IDisposable
             log.Debug("TravelController: mount attempt {Attempt} timed out", attempt + 1);
         }
 
-        return condition[ConditionFlag.Mounted];
+        return await IsConditionActiveAsync(ConditionFlag.Mounted, token).ConfigureAwait(false);
     }
 
-    private async Task<bool> TryNavmeshMoveAsync(Vector3 destination, CancellationToken token)
+    private async Task<bool> TryNavmeshMoveAsync(Guid jobId, Vector3 destination, CancellationToken token)
     {
         if (!navmeshClient.IsAvailable)
         {
@@ -365,15 +471,28 @@ public sealed class TravelController : ITravelController, IDisposable
 
         for (var attempt = 0; attempt < NavmeshMaxAttempts && !token.IsCancellationRequested; attempt++)
         {
-            if (!navmeshClient.EnsureReady())
+            var ready = await RunForJobOnFrameworkThreadAsync(jobId, navmeshClient.EnsureReady, token).ConfigureAwait(false);
+            if (!ready)
             {
                 await Task.Delay(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
                 continue;
             }
 
-            if (navmeshClient.SimpleMoveTo(destination))
+            var moveIssued = await RunForJobOnFrameworkThreadAsync(
+                jobId,
+                () =>
+                {
+                    var issued = navmeshClient.SimpleMoveTo(destination);
+                    if (issued)
+                    {
+                        navmeshJobId = jobId;
+                    }
+
+                    return issued;
+                },
+                token).ConfigureAwait(false);
+            if (moveIssued)
             {
-                StartDismountMonitor(destination, token);
                 return true;
             }
 
@@ -383,7 +502,7 @@ public sealed class TravelController : ITravelController, IDisposable
         return false;
     }
 
-    private void StartDismountMonitor(Vector3 destination, CancellationToken token)
+    private void StartDismountMonitor(Guid jobId, Vector3 destination, CancellationToken token)
     {
         lock (dismountGate)
         {
@@ -391,7 +510,7 @@ public sealed class TravelController : ITravelController, IDisposable
             dismountCts?.Dispose();
             dismountCts = CancellationTokenSource.CreateLinkedTokenSource(token);
             var monitorToken = dismountCts.Token;
-            dismountMonitorTask = Task.Run(() => MonitorDismountAsync(destination, monitorToken), monitorToken);
+            dismountMonitorTask = Task.Run(() => MonitorDismountAsync(jobId, destination, monitorToken), monitorToken);
         }
     }
 
@@ -400,6 +519,11 @@ public sealed class TravelController : ITravelController, IDisposable
         var navmeshStopped = false;
         while (!token.IsCancellationRequested)
         {
+            if (DateTimeOffset.UtcNow - job.CreatedAt > TravelTimeout)
+            {
+                throw new TimeoutException("Travel timed out before reaching the destination");
+            }
+
             var position = await TryGetPlayerPositionAsync(token).ConfigureAwait(false);
             if (position is not Vector3 playerPosition)
             {
@@ -412,11 +536,11 @@ public sealed class TravelController : ITravelController, IDisposable
             {
                 if (!navmeshStopped)
                 {
-                    navmeshClient.Stop();
+                    StopNavmesh(job.JobId);
                     navmeshStopped = true;
                 }
-                UpdatePhaseInternal(TravelPhase.Arriving, $"within {distance:F1}y, waiting for dismount");
-                if (!condition[ConditionFlag.Mounted])
+                UpdatePhaseInternal(job.JobId, TravelPhase.Arriving, $"within {distance:F1}y, waiting for dismount");
+                if (await DismountAtDestinationAsync(job.JobId, token).ConfigureAwait(false))
                 {
                     return;
                 }
@@ -426,11 +550,40 @@ public sealed class TravelController : ITravelController, IDisposable
         }
     }
 
+    private async Task<bool> DismountAtDestinationAsync(Guid jobId, CancellationToken token)
+    {
+        if (!await IsConditionActiveAsync(ConditionFlag.Mounted, token).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        var startedAt = DateTimeOffset.UtcNow;
+        while (!token.IsCancellationRequested && DateTimeOffset.UtcNow - startedAt < DismountTimeout)
+        {
+            log.Debug("TravelController: issuing dismount request");
+            await TryUseGeneralActionAsync(jobId, DismountActionId, token).ConfigureAwait(false);
+            if (await WaitForConditionAsync(() => !condition[ConditionFlag.Mounted], DismountAttemptTimeout, token).ConfigureAwait(false))
+            {
+                log.Debug("TravelController: dismount confirmed");
+                return true;
+            }
+
+            await Task.Delay(DismountRetryDelay, token).ConfigureAwait(false);
+        }
+
+        log.Debug("TravelController: dismount timed out near the destination");
+        return !await IsConditionActiveAsync(ConditionFlag.Mounted, token).ConfigureAwait(false);
+    }
+
     private async Task<bool> WaitForWorldReadyAsync(CancellationToken token)
     {
-        while (!token.IsCancellationRequested)
+        var startedAt = DateTimeOffset.UtcNow;
+        while (!token.IsCancellationRequested && DateTimeOffset.UtcNow - startedAt < WorldReadyTimeout)
         {
-            if (!condition[ConditionFlag.BetweenAreas] && IsScreenReady())
+            var ready = await RunOnFrameworkThreadAsync(
+                () => !condition[ConditionFlag.BetweenAreas] && !condition[ConditionFlag.BetweenAreas51] && IsScreenReady(),
+                token).ConfigureAwait(false);
+            if (ready)
             {
                 var position = await TryGetPlayerPositionAsync(token).ConfigureAwait(false);
                 if (position.HasValue)
@@ -445,7 +598,7 @@ public sealed class TravelController : ITravelController, IDisposable
         return false;
     }
 
-    private bool IsAlreadyWithinArrivalRadius(FateSelection selection)
+    private bool IsAlreadyWithinArrivalRadius(FateSelection selection, float arrivalRadius)
     {
         var player = objectTable.LocalPlayer;
         if (player == null)
@@ -454,7 +607,7 @@ public sealed class TravelController : ITravelController, IDisposable
         }
 
         var distance = Vector3.Distance(player.Position, selection.Destination);
-        if (distance > DefaultArrivalRadius)
+        if (distance > arrivalRadius)
         {
             return false;
         }
@@ -499,15 +652,16 @@ public sealed class TravelController : ITravelController, IDisposable
         return false;
     }
 
-    private async Task MonitorDismountAsync(Vector3 destination, CancellationToken token)
+    private async Task MonitorDismountAsync(Guid jobId, Vector3 destination, CancellationToken token)
     {
         try
         {
+            DateTimeOffset? dismountStartedAt = null;
             while (!token.IsCancellationRequested)
             {
                 await Task.Delay(PollInterval, token).ConfigureAwait(false);
 
-                if (!condition[ConditionFlag.Mounted])
+                if (!await IsConditionActiveAsync(ConditionFlag.Mounted, token).ConfigureAwait(false))
                 {
                     return;
                 }
@@ -526,15 +680,21 @@ public sealed class TravelController : ITravelController, IDisposable
 
                 log.Debug("TravelController: within dismount range ({Distance:F1}y)", distance);
 
-                while (!token.IsCancellationRequested && condition[ConditionFlag.Mounted])
+                while (!token.IsCancellationRequested && await IsConditionActiveAsync(ConditionFlag.Mounted, token).ConfigureAwait(false))
                 {
+                    dismountStartedAt ??= DateTimeOffset.UtcNow;
+                    if (DateTimeOffset.UtcNow - dismountStartedAt.Value > DismountTimeout)
+                    {
+                        log.Warning("TravelController: dismount timed out near the destination");
+                        return;
+                    }
+
                     log.Debug("TravelController: issuing dismount request");
-                    TryUseGeneralAction(DismountActionId);
+                    await TryUseGeneralActionAsync(jobId, DismountActionId, token).ConfigureAwait(false);
 
                     if (await WaitForConditionAsync(() => !condition[ConditionFlag.Mounted], DismountAttemptTimeout, token).ConfigureAwait(false))
                     {
                         log.Debug("TravelController: dismount confirmed");
-                        UpdatePhaseInternal(TravelPhase.Arrived, "Arrival radius reached");
                         return;
                     }
 
@@ -549,24 +709,9 @@ public sealed class TravelController : ITravelController, IDisposable
 
     private async Task<Vector3?> TryGetPlayerPositionAsync(CancellationToken token)
     {
-        var tcs = new TaskCompletionSource<Vector3?>();
-        using var registration = token.Register(() => tcs.TrySetCanceled(token));
-
-        _ = framework.RunOnFrameworkThread(() =>
-        {
-            try
-            {
-                tcs.TrySetResult(objectTable.LocalPlayer?.Position);
-            }
-            catch (Exception ex)
-            {
-                tcs.TrySetException(ex);
-            }
-        });
-
         try
         {
-            return await tcs.Task.ConfigureAwait(false);
+            return await RunOnFrameworkThreadAsync(() => objectTable.LocalPlayer?.Position, token).ConfigureAwait(false);
         }
         catch (TaskCanceledException)
         {
@@ -584,7 +729,7 @@ public sealed class TravelController : ITravelController, IDisposable
         var elapsed = TimeSpan.Zero;
         while (elapsed < timeout && !token.IsCancellationRequested)
         {
-            if (predicate())
+            if (await RunOnFrameworkThreadAsync(predicate, token).ConfigureAwait(false))
             {
                 return true;
             }
@@ -601,7 +746,17 @@ public sealed class TravelController : ITravelController, IDisposable
             elapsed += PollInterval;
         }
 
-        return predicate();
+        return !token.IsCancellationRequested && await RunOnFrameworkThreadAsync(predicate, token).ConfigureAwait(false);
+    }
+
+    private async Task<bool> TryUseGeneralActionAsync(Guid jobId, uint actionId, CancellationToken token)
+    {
+        return await RunForJobOnFrameworkThreadAsync(jobId, () => TryUseGeneralAction(actionId), token).ConfigureAwait(false);
+    }
+
+    private async Task<bool> IsConditionActiveAsync(ConditionFlag flag, CancellationToken token)
+    {
+        return await RunOnFrameworkThreadAsync(() => condition[flag], token).ConfigureAwait(false);
     }
 
     private unsafe bool TryUseGeneralAction(uint actionId)
@@ -629,8 +784,8 @@ public sealed class TravelController : ITravelController, IDisposable
     private void FailJob(Guid jobId, string reason)
     {
         log.Debug("TravelController: job {JobId} failed: {Reason}", jobId, reason);
-        UpdatePhaseInternal(TravelPhase.Failed, reason);
-        navmeshClient.Stop();
+        UpdatePhaseInternal(jobId, TravelPhase.Failed, reason);
+        StopNavmesh(jobId);
     }
 
     private void CleanupJob(Guid jobId)
@@ -642,13 +797,13 @@ public sealed class TravelController : ITravelController, IDisposable
                 return;
             }
 
+            StopNavmesh(jobId);
             currentJob = null;
             jobCts?.Dispose();
             jobCts = null;
             jobTask = null;
             phase = TravelPhase.Idle;
             phaseDetail = null;
-            navmeshClient.Stop();
         }
 
         lock (dismountGate)
@@ -660,28 +815,157 @@ public sealed class TravelController : ITravelController, IDisposable
         }
     }
 
+    private void DetachCancelledJobLocked()
+    {
+        var cancelledCts = jobCts;
+        var cancelledTask = jobTask;
+        jobCts = null;
+        jobTask = null;
+
+        if (cancelledCts == null)
+        {
+            return;
+        }
+
+        if (cancelledTask == null || cancelledTask.IsCompleted)
+        {
+            cancelledCts.Dispose();
+            return;
+        }
+
+        _ = cancelledTask.ContinueWith(
+            _ => cancelledCts.Dispose(),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
     private void UpdatePhaseInternal(TravelPhase newPhase, string detail)
     {
+        UpdatePhaseInternal(null, newPhase, detail);
+    }
+
+    private bool UpdatePhaseInternal(Guid? jobId, TravelPhase newPhase, string detail)
+    {
+        TravelJob? snapshot;
         lock (jobGate)
         {
+            if (jobId.HasValue && currentJob?.JobId != jobId.Value)
+            {
+                log.Debug("TravelController: ignored stale phase {Phase} from job {JobId}", newPhase, jobId.Value);
+                return false;
+            }
+
             phase = newPhase;
             phaseDetail = detail;
-            if (currentJob is { } job)
+            snapshot = currentJob;
+            if (snapshot is { } job)
             {
                 currentJob = job with { Status = detail };
             }
         }
 
         log.Debug("TravelController: phase => {Phase} ({Detail})", newPhase, detail);
+        PhaseChanged?.Invoke(this, new TravelPhaseChangedEventArgs(newPhase, detail, snapshot));
+        return true;
+    }
+
+    private void StopNavmesh(Guid jobId)
+    {
+        _ = framework.RunOnFrameworkThread(() =>
+        {
+            lock (jobGate)
+            {
+                if (navmeshJobId != jobId)
+                {
+                    return;
+                }
+
+                navmeshJobId = null;
+            }
+
+            navmeshClient.Stop();
+        });
+    }
+
+    private async Task<T> RunOnFrameworkThreadAsync<T>(Func<T> action, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = token.Register(() => tcs.TrySetCanceled(token));
+
+        try
+        {
+            _ = framework.RunOnFrameworkThread(() =>
+            {
+                try
+                {
+                    tcs.TrySetResult(action());
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            tcs.TrySetException(ex);
+        }
+
+        return await tcs.Task.ConfigureAwait(false);
+    }
+
+    private async Task<T> RunForJobOnFrameworkThreadAsync<T>(Guid jobId, Func<T> action, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = token.Register(() => tcs.TrySetCanceled(token));
+
+        try
+        {
+            _ = framework.RunOnFrameworkThread(() =>
+            {
+                if (token.IsCancellationRequested || !IsCurrentJob(jobId))
+                {
+                    tcs.TrySetCanceled();
+                    return;
+                }
+
+                try
+                {
+                    tcs.TrySetResult(action());
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            tcs.TrySetException(ex);
+        }
+
+        return await tcs.Task.ConfigureAwait(false);
+    }
+
+    private bool IsCurrentJob(Guid jobId)
+    {
+        lock (jobGate)
+        {
+            return currentJob?.JobId == jobId;
+        }
     }
 
     public void Dispose()
     {
         Cancel("plugin disposing");
-        jobTask?.Dispose();
         lock (dismountGate)
         {
-            dismountMonitorTask?.Dispose();
+            dismountCts?.Cancel();
+            dismountCts?.Dispose();
+            dismountCts = null;
         }
     }
 }

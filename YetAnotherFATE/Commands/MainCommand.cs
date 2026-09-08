@@ -23,7 +23,7 @@ public sealed class MainCommand(ICommandManager commandManager, IPluginLog logge
 
         commandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Yet Another FATE UI (/yafate config for settings)"
+            HelpMessage = "Open Yet Another FATE UI (/yafate config for settings, /yafate debug for diagnostics)"
         });
 
         registered = true;

@@ -1,8 +1,6 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using System.Threading.Tasks;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Ipc.Exceptions;
@@ -18,10 +16,8 @@ public sealed class NavmeshClient : INavmeshClient
     private const string PathPath = "Path";
 
     private readonly IDalamudPluginInterface pluginInterface;
-    private readonly IFramework framework;
     private readonly IPluginLog log;
 
-    private readonly bool isInstalled;
     private string status = "navmesh not initialized";
 
     private ICallGateSubscriber<bool>? isReady;
@@ -29,21 +25,21 @@ public sealed class NavmeshClient : INavmeshClient
     private ICallGateSubscriber<Vector3, bool, bool>? simpleMove;
     private ICallGateSubscriber<bool>? stop;
 
-    public NavmeshClient(IDalamudPluginInterface pluginInterface, IFramework framework, IPluginLog log)
+    public NavmeshClient(IDalamudPluginInterface pluginInterface, IPluginLog log)
     {
         this.pluginInterface = pluginInterface;
-        this.framework = framework;
         this.log = log;
-        isInstalled = pluginInterface.InstalledPlugins.Any(p => p.Name == PluginName && p.IsLoaded);
-        status = isInstalled ? "navmesh detected" : "vnavmesh not installed";
-
-        if (isInstalled)
+        if (IsPluginLoaded())
         {
             InitializeSubscribers();
         }
+        else
+        {
+            status = "vnavmesh not loaded";
+        }
     }
 
-    public bool IsAvailable => isInstalled;
+    public bool IsAvailable => IsPluginLoaded();
     public string Status => status;
 
     private void InitializeSubscribers()
@@ -65,7 +61,18 @@ public sealed class NavmeshClient : INavmeshClient
 
     public bool EnsureReady()
     {
-        if (!IsAvailable || isReady == null)
+        if (!IsPluginLoaded())
+        {
+            status = "vnavmesh not loaded";
+            return false;
+        }
+
+        if (isReady == null || reload == null || simpleMove == null || stop == null)
+        {
+            InitializeSubscribers();
+        }
+
+        if (isReady == null)
         {
             status = "navmesh IPC missing";
             return false;
@@ -118,9 +125,9 @@ public sealed class NavmeshClient : INavmeshClient
 
     public bool SimpleMoveTo(Vector3 destination, bool useMesh = true)
     {
-        if (!IsAvailable || simpleMove == null)
+        if (!IsPluginLoaded())
         {
-            status = "navmesh plugin unavailable";
+            status = "vnavmesh not loaded";
             return false;
         }
 
@@ -129,29 +136,22 @@ public sealed class NavmeshClient : INavmeshClient
             return false;
         }
 
-            try
-            {
-                var result = false;
-                framework.RunOnFrameworkThread(() =>
-                {
-                    try
-                    {
-                        result = simpleMove.InvokeFunc(destination, useMesh);
-                        status = result ? "navmesh move issued" : "navmesh move rejected";
-                    }
-                    catch (Exception ex)
-                    {
-                        status = $"navmesh move failed: {ex.Message}";
-                        log.Debug(ex, "NavmeshClient: move failed inside framework thread");
-                    }
-                }).Wait();
+        if (simpleMove == null)
+        {
+            status = "navmesh IPC missing";
+            return false;
+        }
 
-                return result;
-            }
-        catch (AggregateException agg) when (agg.InnerException is IpcNotReadyError ipcEx)
+        try
+        {
+            var result = simpleMove.InvokeFunc(destination, useMesh);
+            status = result ? "navmesh move issued" : "navmesh move rejected";
+            return result;
+        }
+        catch (IpcNotReadyError ex)
         {
             status = "vnavmesh IPC not registered (plugin disabled?)";
-            log.Debug(ipcEx, "NavmeshClient: move IPC not registered");
+            log.Debug(ex, "NavmeshClient: move IPC not registered");
             return false;
         }
         catch (Exception ex)
@@ -164,8 +164,19 @@ public sealed class NavmeshClient : INavmeshClient
 
     public bool Stop()
     {
-        if (!IsAvailable || stop == null)
+        if (!IsPluginLoaded())
         {
+            return false;
+        }
+
+        if (stop == null)
+        {
+            InitializeSubscribers();
+        }
+
+        if (stop == null)
+        {
+            status = "navmesh IPC missing";
             return false;
         }
 
@@ -187,6 +198,28 @@ public sealed class NavmeshClient : INavmeshClient
             log.Debug(ex, "NavmeshClient: stop failed");
             return false;
         }
+    }
+
+    private bool IsPluginLoaded()
+    {
+        var plugin = pluginInterface.InstalledPlugins.FirstOrDefault(p =>
+            string.Equals(p.InternalName, PluginName, StringComparison.OrdinalIgnoreCase));
+
+        if (plugin == null)
+        {
+            return false;
+        }
+
+        if (plugin.IsLoaded)
+        {
+            return true;
+        }
+
+        isReady = null;
+        reload = null;
+        simpleMove = null;
+        stop = null;
+        return false;
     }
 
     private bool reloadAttempted;

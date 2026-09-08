@@ -10,12 +10,14 @@ public class MainWindow : Window, IDisposable
 {
     private readonly MainRenderer renderer;
     private readonly ConfigWindow configWindow;
+    private readonly DebugWindow debugWindow;
 
-    public MainWindow(MainRenderer renderer, ConfigWindow configWindow)
+    public MainWindow(MainRenderer renderer, ConfigWindow configWindow, DebugWindow debugWindow)
         : base("Yet Another FATE##main", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         this.renderer = renderer;
         this.configWindow = configWindow;
+        this.debugWindow = debugWindow;
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -28,6 +30,6 @@ public class MainWindow : Window, IDisposable
 
     public override void Draw()
     {
-        renderer.Draw(configWindow.Toggle);
+        renderer.Draw(configWindow.Toggle, debugWindow.Toggle);
     }
 }

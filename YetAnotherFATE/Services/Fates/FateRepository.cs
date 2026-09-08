@@ -4,6 +4,7 @@ using System.Numerics;
 using Dalamud.Game.ClientState.Fates;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.Game.Fate;
 using YetAnotherFATE.Data.Fates;
 
 namespace YetAnotherFATE.Services.Fates;
@@ -45,7 +46,6 @@ public sealed class FateRepository : IFateRepository
 
         if (fateTable.Count == 0)
         {
-            log.Debug("FateRepository: fate table empty in territory {TerritoryId}", clientState.TerritoryType);
             return Empty;
         }
 
@@ -59,7 +59,7 @@ public sealed class FateRepository : IFateRepository
                 continue;
             }
 
-            if (fate.State is FateState.Ended or FateState.Failed or FateState.WaitingForEnd)
+            if (fate.State is Dalamud.Game.ClientState.Fates.FateState.Ended or Dalamud.Game.ClientState.Fates.FateState.Failed)
             {
                 continue;
             }
@@ -67,10 +67,8 @@ public sealed class FateRepository : IFateRepository
             var name = SanitizeName(fate.Name);
             var territoryId = fate.TerritoryType.RowId;
             var distance = Vector3.Distance(playerPosition, fate.Position);
-            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            var estimatedEnd = fate.StartTimeEpoch + fate.Duration;
-            var remainingSeconds = Math.Max(0, estimatedEnd - now);
-            var timeRemaining = TimeSpan.FromSeconds(remainingSeconds);
+            var timeRemaining = TimeSpan.FromSeconds(Math.Max(0, fate.TimeRemaining));
+            var context = GetFateContext(fate);
 
             var isContinuation = false;
 
@@ -83,7 +81,25 @@ public sealed class FateRepository : IFateRepository
                 fate.Radius,
                 distance,
                 isContinuation,
-                timeRemaining));
+                timeRemaining,
+                fate.State,
+                SanitizeName(fate.Description),
+                SanitizeName(fate.Objective),
+                fate.Progress,
+                fate.HandInCount,
+                fate.HasBonus,
+                fate.MaxLevel,
+                fate.IconId,
+                fate.MapIconId,
+                fate.StartTimeEpoch,
+                fate.Duration,
+                context.MotivationNpc,
+                context.ObjectiveNpc,
+                context.Rule,
+                context.FateRuleEx,
+                context.EventItem,
+                context.ReqEventItem,
+                context.TurnInEventItem));
         }
 
         return results;
@@ -93,5 +109,10 @@ public sealed class FateRepository : IFateRepository
     {
         var name = rawName.TextValue;
         return string.IsNullOrWhiteSpace(name) ? "Unknown Fate" : name;
+    }
+
+    private static unsafe FateContext GetFateContext(IFate fate)
+    {
+        return fate.Address == nint.Zero ? default : *(FateContext*)fate.Address;
     }
 }

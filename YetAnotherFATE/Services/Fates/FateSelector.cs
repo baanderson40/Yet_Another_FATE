@@ -15,6 +15,7 @@ public sealed class FateSelector : IFateSelector
     private readonly ITeleportAdvisor teleportAdvisor;
     private readonly Configuration configuration;
     private readonly IPluginLog log;
+    private DateTimeOffset nextDiagnosticLogAt = DateTimeOffset.MinValue;
 
     private const double DistanceWeight = 0.5;
     private const double LevelWeight = 20.0;
@@ -28,74 +29,124 @@ public sealed class FateSelector : IFateSelector
     }
 
     public FateSelection? SelectBest(IReadOnlyList<ActiveFate> activeFates)
+        => Evaluate(activeFates).Selected;
+
+    public FateSelectionDiagnostics Evaluate(IReadOnlyList<ActiveFate> activeFates)
     {
         if (activeFates == null || activeFates.Count == 0)
         {
-            return null;
+            return new FateSelectionDiagnostics(DateTimeOffset.UtcNow, Array.Empty<FateCandidateDiagnostic>(), null);
         }
 
         double? bestScore = null;
         FateSelection? best = null;
+        var diagnostics = new List<FateCandidateDiagnostic>(activeFates.Count);
 
         foreach (var fate in activeFates)
         {
+            var teleport = teleportAdvisor.Analyze(fate);
             if (configuration.FateBlacklist?.Contains(fate.FateId) == true)
             {
+                diagnostics.Add(new FateCandidateDiagnostic(fate, false, "blacklisted", null, teleport));
                 continue;
             }
 
-            if (fate.TimeRemaining.TotalSeconds <= 20)
+            if (fate.State != Dalamud.Game.ClientState.Fates.FateState.Running)
             {
+                if (!fate.RequiresActivation || fate.MotivationNpc == 0 || fate.MotivationNpc == 0xE0000000)
+                {
+                    var reason = fate.RequiresActivation
+                        ? "preparing; motivation NPC id unavailable"
+                        : $"FATE state is {fate.State}";
+                    diagnostics.Add(new FateCandidateDiagnostic(fate, false, reason, null, teleport));
+                    continue;
+                }
+            }
+
+            if (fate.State == Dalamud.Game.ClientState.Fates.FateState.Running && fate.TimeRemaining.TotalSeconds <= 20)
+            {
+                diagnostics.Add(new FateCandidateDiagnostic(fate, false, "20 seconds or less remaining", null, teleport));
                 continue;
             }
 
-            var teleport = teleportAdvisor.Evaluate(fate);
             var reasons = new List<string>();
-            var score = ComputeScore(fate, teleport, reasons);
+            var breakdown = ComputeScore(fate, teleport.Recommendation, reasons);
+            diagnostics.Add(new FateCandidateDiagnostic(fate, true, null, breakdown, teleport));
 
-            if (bestScore == null || score > bestScore)
+            if (bestScore == null || breakdown.FinalScore > bestScore)
             {
-                bestScore = score;
+                bestScore = breakdown.FinalScore;
                 best = new FateSelection(
                     fate,
                     fate.Center,
-                    teleport.ShouldTeleport,
-                    teleport.AetheryteId,
-                    score,
+                    teleport.Recommendation.ShouldTeleport,
+                    teleport.Recommendation.AetheryteId,
+                    breakdown.FinalScore,
                     string.Join(", ", reasons),
-                    teleport);
+                    teleport.Recommendation);
             }
         }
 
-        return best;
+        var result = new FateSelectionDiagnostics(DateTimeOffset.UtcNow, diagnostics, best);
+        if (configuration.DiagnosticLoggingEnabled && DateTimeOffset.UtcNow >= nextDiagnosticLogAt)
+        {
+            nextDiagnosticLogAt = DateTimeOffset.UtcNow.AddSeconds(10);
+            log.Debug("FateSelector: evaluated {Count} candidates; selected={Selected}", diagnostics.Count, best?.Fate.FateId.ToString() ?? "none");
+            foreach (var candidate in diagnostics)
+            {
+                log.Debug(
+                    "FateSelector: fate #{FateId} eligible={Eligible} score={Score} reason={Reason} teleport={Teleport} aetheryte={Aetheryte}",
+                    candidate.Fate.FateId,
+                    candidate.Eligible,
+                    candidate.Score?.FinalScore.ToString("F1") ?? "n/a",
+                    candidate.ExclusionReason ?? candidate.Score?.ToString() ?? "n/a",
+                    candidate.Teleport.Recommendation.ShouldTeleport,
+                    candidate.Teleport.Recommendation.AetheryteName ?? "none");
+            }
+        }
+
+        return result;
     }
 
-    private double ComputeScore(ActiveFate fate, TeleportRecommendation teleport, List<string> reasons)
+    private SelectionScoreBreakdown ComputeScore(ActiveFate fate, TeleportRecommendation teleport, List<string> reasons)
     {
-        double score = 1000;
+        const double baseScore = 1000;
+        var score = baseScore;
 
         var distancePenalty = fate.DistanceFromPlayer * DistanceWeight;
         score -= distancePenalty;
         reasons.Add($"dist-{fate.DistanceFromPlayer:F0}");
 
         var seconds = fate.TimeRemaining.TotalSeconds;
-        if (seconds < 60)
+        var timeAdjustment = 0.0;
+        var activationPenalty = 0.0;
+        if (fate.RequiresActivation)
+        {
+            activationPenalty = 25;
+            score -= activationPenalty;
+            reasons.Add("activation");
+        }
+        else if (seconds < 60)
         {
             score -= 250;
+            timeAdjustment = -250;
             reasons.Add("time<60s");
         }
         else if (seconds < 180)
         {
             score -= 75;
+            timeAdjustment = -75;
             reasons.Add("time<3m");
         }
         else
         {
             score += 25;
+            timeAdjustment = 25;
         }
 
         var levelDiff = Math.Abs(fate.Level - playerState.EffectiveLevel);
-        score -= levelDiff * LevelWeight;
+        var levelPenalty = levelDiff * LevelWeight;
+        score -= levelPenalty;
         reasons.Add($"lvl∆{levelDiff}");
 
         if (teleport.ShouldTeleport)
@@ -109,12 +160,25 @@ public sealed class FateSelector : IFateSelector
             reasons.Add($"run:{teleport.Reason}");
         }
 
+        var travelAdjustment = teleport.ShouldTeleport ? 80 : -15;
+
+        var continuationBonus = 0.0;
         if (fate.IsContinuation)
         {
             score += 40;
+            continuationBonus = 40;
             reasons.Add("chain");
         }
 
-        return score;
+        return new SelectionScoreBreakdown(
+            baseScore,
+            distancePenalty,
+            timeAdjustment,
+            activationPenalty,
+            levelDiff,
+            levelPenalty,
+            travelAdjustment,
+            continuationBonus,
+            score);
     }
 }

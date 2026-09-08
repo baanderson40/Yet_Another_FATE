@@ -7,7 +7,9 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
+using YetAnotherFATE.Chains;
 using YetAnotherFATE.Config;
+using YetAnotherFATE.Data.Travel;
 using YetAnotherFATE.Services.Fates;
 
 namespace YetAnotherFATE.Renderers;
@@ -21,6 +23,7 @@ public sealed class MainRenderer
     private readonly IFateRepository fateRepository;
     private readonly IFateSelector fateSelector;
     private readonly IPluginLog log;
+    private readonly AutomatorChain automatorChain;
 
     public MainRenderer(
         Configuration configuration,
@@ -29,7 +32,8 @@ public sealed class MainRenderer
         IDataManager dataManager,
         IFateRepository fateRepository,
         IFateSelector fateSelector,
-        IPluginLog log)
+        IPluginLog log,
+        AutomatorChain automatorChain)
     {
         this.configuration = configuration;
         this.playerState = playerState;
@@ -38,15 +42,20 @@ public sealed class MainRenderer
         this.fateRepository = fateRepository;
         this.fateSelector = fateSelector;
         this.log = log;
+        this.automatorChain = automatorChain;
     }
 
-    public void Draw(System.Action openConfigAction)
+    public void Draw(System.Action openConfigAction, System.Action openDebugAction)
     {
-        ImGui.Text($"The random config bool is {configuration.SomePropertyToBeSavedAndWithADefault}");
-
         if (ImGui.Button("Show Settings"))
         {
             openConfigAction();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Debug"))
+        {
+            openDebugAction();
         }
 
         var automatorEnabled = configuration.AutomatorEnabled;
@@ -54,6 +63,24 @@ public sealed class MainRenderer
         {
             configuration.AutomatorEnabled = automatorEnabled;
             configuration.Save();
+        }
+
+        ImGui.Text($"Automator: {automatorChain.State}");
+        if (!string.IsNullOrWhiteSpace(automatorChain.StateReason))
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled(automatorChain.StateReason);
+        }
+
+        if (automatorChain.CurrentSelection is { } selection)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled($"FATE #{selection.Fate.FateId} {selection.Fate.Name}");
+        }
+
+        if (automatorChain.TravelPhase != TravelPhase.Idle)
+        {
+            ImGui.TextDisabled($"Travel: {automatorChain.TravelPhase} {automatorChain.TravelPhaseDetail}");
         }
 
         ImGui.Spacing();
@@ -64,7 +91,7 @@ public sealed class MainRenderer
             return;
         }
 
-        ImGui.Text("Yet Another FATE bootstrap window");
+        ImGui.Text("Active FATEs");
         ImGuiHelpers.ScaledDummy(20.0f);
 
         if (!playerState.IsLoaded)

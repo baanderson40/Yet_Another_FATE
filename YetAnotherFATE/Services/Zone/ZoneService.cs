@@ -155,15 +155,15 @@ public sealed class ZoneService : IZoneService
                 name = $"Aetheryte {aetheryte.RowId}";
             }
 
+            var position = ResolveAetherytePosition(aetheryte, territoryId);
             var summary = new AetheryteSummary(
                 (uint)aetheryte.RowId,
                 territoryId,
                 name!,
                 aetheryte.PlaceName.RowId,
-                new Vector3(
-                    ReadFloatProperty(aetheryte, "X", "PosX", "MapX", "Unknown6"),
-                    ReadFloatProperty(aetheryte, "Y", "PosY", "MapY", "Unknown7"),
-                    ReadFloatProperty(aetheryte, "Z", "PosZ", "MapZ", "Unknown8")),
+                position.Position,
+                position.Source,
+                position.HasValue,
                 aetheryte.RowId == territoryRow.Aetheryte.RowId,
                 0,
                 0,
@@ -176,6 +176,76 @@ public sealed class ZoneService : IZoneService
             .OrderByDescending(s => s.IsPrimary)
             .ThenBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private (Vector3 Position, string Source, bool HasValue) ResolveAetherytePosition(Aetheryte aetheryte, uint territoryId)
+    {
+        try
+        {
+            var level = aetheryte.Level[0].ValueNullable;
+            if (level is { } levelPosition)
+            {
+                return (new Vector3(levelPosition.X, levelPosition.Y, levelPosition.Z), "Level", true);
+            }
+
+            var maps = dataManager.GetExcelSheet<Map>();
+            var markers = dataManager.GetSubrowExcelSheet<MapMarker>();
+            if (maps == null || markers == null)
+            {
+                return (Vector3.Zero, "unavailable", false);
+            }
+
+            var aethernetNameId = aetheryte.AethernetName.RowId;
+            Vector3? preferred = null;
+            Vector3? fallback = null;
+            foreach (var map in maps)
+            {
+                if (map.MapMarkerRange == 0 || map.SizeFactor == 0 || !markers.TryGetRow(map.MapMarkerRange, out var markerGroup))
+                {
+                    continue;
+                }
+
+                foreach (var marker in markerGroup)
+                {
+                    var matches = marker.DataType == 3 && marker.DataKey.RowId == aetheryte.RowId
+                        || marker.DataType == 4 && marker.DataKey.RowId == aethernetNameId;
+                    if (!matches)
+                    {
+                        continue;
+                    }
+
+                    var scale = map.SizeFactor / 100f;
+                    var position = new Vector3(
+                        (marker.X - 1024f) / scale - map.OffsetX,
+                        0,
+                        (marker.Y - 1024f) / scale - map.OffsetY);
+                    if (map.TerritoryType.RowId == territoryId)
+                    {
+                        preferred = position;
+                    }
+                    else
+                    {
+                        fallback ??= position;
+                    }
+                }
+            }
+
+            if (preferred is { } preferredPosition)
+            {
+                return (preferredPosition, "MapMarker", true);
+            }
+
+            if (fallback is { } fallbackPosition)
+            {
+                return (fallbackPosition, "MapMarker (fallback map)", true);
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "ZoneService: Failed to resolve position for aetheryte {AetheryteId}", aetheryte.RowId);
+        }
+
+        return (Vector3.Zero, "unavailable", false);
     }
 
     private IReadOnlyList<AetheryteSummary> DetermineUnlockedAetherytes(ZoneStaticInfo metadata)
@@ -205,6 +275,7 @@ public sealed class ZoneService : IZoneService
                 {
                     GilCost = entry.GilCost,
                     IsFavourite = entry.IsFavourite,
+                    SubIndex = entry.SubIndex,
                 };
 
                 unlocked.Add(enriched);
@@ -219,7 +290,7 @@ public sealed class ZoneService : IZoneService
         catch (Exception ex)
         {
             log.Error(ex, "ZoneService: Failed to enumerate IAetheryteList for territory {TerritoryId}", metadata.TerritoryId);
-            return metadata.Aetherytes;
+            return Array.Empty<AetheryteSummary>();
         }
     }
 

@@ -58,6 +58,6 @@ public sealed class FateDebugReporter : IFateDebugReporter
     {
         var distance = fate.DistanceFromPlayer.ToString("F0", CultureInfo.InvariantCulture);
         var remaining = fate.TimeRemaining.ToString(@"m\:ss", CultureInfo.InvariantCulture);
-        return $"[YAFate] #{fate.FateId} {fate.Name} @ {distance}y — {remaining} remaining";
+        return $"[YAFate] #{fate.FateId} {fate.Name} [{fate.State}] @ {distance}y — {remaining} remaining, progress={fate.Progress}%";
     }
 }

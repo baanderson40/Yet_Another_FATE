@@ -9,13 +9,23 @@ using YetAnotherFATE.Commands;
 using YetAnotherFATE.Config;
 using YetAnotherFATE.Chains;
 using YetAnotherFATE.Modules.Automator;
+using YetAnotherFATE.Modules.Automator.Handlers;
+using YetAnotherFATE.Modules.Automator.Handlers.ParticipatingInFate.Handlers;
+using YetAnotherFATE.Modules.Automator.Handlers.TravellingToFate.Handlers;
 using YetAnotherFATE.Modules.Ux;
 using YetAnotherFATE.Renderers;
+using YetAnotherFATE.Services.Combat;
 using YetAnotherFATE.Services.Fates;
+using YetAnotherFATE.Services.Fates.CombatHelper.LevelSync;
+using YetAnotherFATE.Services.Fates.CombatHelper.Engagement;
+using YetAnotherFATE.Services.Fates.CombatHelper.Targeter;
 using YetAnotherFATE.Services.Movement;
 using YetAnotherFATE.Services.Zone;
 using YetAnotherFATE.Services.Travel;
 using YetAnotherFATE.Windows;
+using YetAnotherFATE.Services.Combat.RotationSolver;
+using YetAnotherFATE.Services.Combat.Wrath;
+using YetAnotherFATE.Services.Combat.BossMod;
 
 namespace YetAnotherFATE;
 
@@ -94,12 +104,17 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton(Condition);
 
         services.AddSingleton<ConfigWindow>();
+        services.AddSingleton<DebugRenderer>();
+        services.AddSingleton<DebugWindow>();
         services.AddSingleton<MainRenderer>();
         services.AddSingleton<MainWindow>();
 
         services.AddSingleton<UxModule>();
         services.AddSingleton<AutomatorModule>();
         services.AddSingleton<AutomatorChain>();
+        services.AddSingleton<IAutomatorStateHandler, TravellingToFateStateHandler>();
+        services.AddSingleton<IAutomatorStateHandler, ActivatingFateStateHandler>();
+        services.AddSingleton<IAutomatorStateHandler, ParticipatingInFateStateHandler>();
 
         services.AddSingleton<IMainCommandDelegate>(provider => new MainCommandDelegate(
             provider.GetRequiredService<UxModule>(),
@@ -119,6 +134,27 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<IObjectTable>(),
             provider.GetRequiredService<IFateTable>(),
             provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<IFateActivationService>(provider => new FateActivationService(
+            provider.GetRequiredService<IObjectTable>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<ICombatPluginRegistry>(provider => new CombatPluginRegistry(
+            provider.GetRequiredService<IDalamudPluginInterface>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<IRotationSolverBridge>(provider => new RotationSolverBridge(
+            provider.GetRequiredService<IDalamudPluginInterface>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<IWrathComboBridge>(provider => new WrathComboBridge(
+            provider.GetRequiredService<IDalamudPluginInterface>(),
+            provider.GetRequiredService<IPlayerState>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<BossModPresetManager>();
+        services.AddSingleton<IFateTargetTracker>(provider => new FateTargetTracker(
+            provider.GetRequiredService<IObjectTable>(),
+            provider.GetRequiredService<IClientState>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<IFateCombatHandler>(provider => new FateCombatHandler(
+            provider.GetRequiredService<IFateTargetTracker>(),
+            provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<IFateDebugReporter, FateDebugReporter>();
         services.AddSingleton<IFateSelector>(provider => new FateSelector(
             provider.GetRequiredService<IPlayerState>(),
@@ -131,7 +167,6 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<INavmeshClient>(provider => new NavmeshClient(
             provider.GetRequiredService<IDalamudPluginInterface>(),
-            provider.GetRequiredService<IFramework>(),
             provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<ITeleportExecutor>(provider => new TeleportExecutor(
             provider.GetRequiredService<IClientState>(),
@@ -146,6 +181,10 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<IObjectTable>(),
             provider.GetRequiredService<IFramework>(),
             provider.GetRequiredService<IGameGui>(),
+            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<ILevelSyncService>(provider => new LevelSyncService(
+            provider.GetRequiredService<IPlayerState>(),
+            provider.GetRequiredService<ICondition>(),
             provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<ITeleportAdvisor>(provider => new TeleportAdvisor(
             provider.GetRequiredService<IZoneService>(),

@@ -1,12 +1,11 @@
 {
   "Author": "YetAnotherFATE Team",
   "Name": "Yet Another FATE",
-  "Punchline": "Bootstrap for the future fate automation plugin.",
-  "Description": "Slash command: /yafate. Currently just the template UI.",
+  "Punchline": "Selects, travels to, and participates in active FATEs.",
+  "Description": "Slash command: /yafate. Configure travel and combat providers from the plugin window.",
   "ApplicableVersion": "any",
   "Tags": [
     "fate",
-    "automation",
-    "template"
+    "automation"
   ]
 }

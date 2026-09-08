@@ -72,6 +72,12 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
             return;
         }
 
+        if (string.Equals(trimmed, "debug", StringComparison.OrdinalIgnoreCase))
+        {
+            uxModule.ToggleDebug();
+            return;
+        }
+
         if (string.Equals(trimmed, "fates", StringComparison.OrdinalIgnoreCase))
         {
             fateDebugReporter.PrintActiveFates();
@@ -167,4 +173,5 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
         travelController.RequestTravel(chosen, kind);
         chatGui.Print($"Navmesh debug: issued move toward {chosen.Fate.Name} (mode={kind})");
     }
+
 }
