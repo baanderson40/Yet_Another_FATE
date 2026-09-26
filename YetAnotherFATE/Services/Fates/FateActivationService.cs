@@ -1,5 +1,7 @@
 using System;
 using System.Linq;
+using System.Numerics;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
@@ -12,11 +14,14 @@ public sealed class FateActivationService : IFateActivationService
 {
     private readonly IObjectTable objectTable;
     private readonly IPluginLog log;
+    private nint? ownedTargetAddress;
+    private readonly ICondition condition;
 
-    public FateActivationService(IObjectTable objectTable, IPluginLog log)
+    public FateActivationService(IObjectTable objectTable, IPluginLog log, ICondition condition)
     {
         this.objectTable = objectTable;
         this.log = log;
+        this.condition = condition;
     }
 
     public string Status { get; private set; } = "activation not started";
@@ -52,7 +57,10 @@ public sealed class FateActivationService : IFateActivationService
 
     public unsafe bool Interact(IGameObject npc)
     {
-        if (!npc.IsTargetable || npc.Address == nint.Zero)
+        var player = objectTable.LocalPlayer;
+        if (player == null || player.CurrentHp == 0 || condition[ConditionFlag.BetweenAreas] ||
+            condition[ConditionFlag.BetweenAreas51] || condition[ConditionFlag.OccupiedInQuestEvent] ||
+            !npc.IsTargetable || npc.Address == nint.Zero || Vector3.Distance(player.Position, npc.Position) > 3f)
         {
             Status = "motivation NPC is not interactable";
             return false;
@@ -66,6 +74,7 @@ public sealed class FateActivationService : IFateActivationService
         }
 
         targetSystem->SetHardTarget((GameObject*)npc.Address, true);
+        ownedTargetAddress = npc.Address;
         var result = targetSystem->InteractWithObject((GameObject*)npc.Address, false);
         Status = $"interaction requested for {npc.Name.TextValue}: result={result}";
         log.Debug("FateActivation: interaction requested npc={Name} gameObjectId={GameObjectId} entityId={EntityId} result={Result}",
@@ -73,6 +82,18 @@ public sealed class FateActivationService : IFateActivationService
             npc.GameObjectId,
             npc.EntityId,
             result);
-        return result != 0;
+        // InteractWithObject's return value is not a reliable acceptance signal. FTK treats
+        // successful object resolution and native dispatch as a successful interaction request.
+        return true;
+    }
+
+    public unsafe void ClearOwnedTarget()
+    {
+        if (ownedTargetAddress is not { } address)
+            return;
+        var targetSystem = TargetSystem.Instance();
+        if (targetSystem != null && targetSystem->GetHardTarget() == (GameObject*)address)
+            targetSystem->SetHardTarget(null, true);
+        ownedTargetAddress = null;
     }
 }

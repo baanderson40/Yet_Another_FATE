@@ -26,6 +26,8 @@ public sealed class TravellingToFateStateHandler : IAutomatorStateHandler
     private DateTimeOffset nextNavmeshWarningAt = DateTimeOffset.MinValue;
     private DateTimeOffset nextNoFatesLogAt = DateTimeOffset.MinValue;
     private readonly Dictionary<uint, DateTimeOffset> retryAfterByFateId = new();
+    private readonly Dictionary<uint, int> failureCountByFateId = new();
+    private readonly Dictionary<uint, (uint Territory, int Start)> failedInstances = new();
 
     public TravellingToFateStateHandler(
         IFateRepository fateRepository,
@@ -45,6 +47,13 @@ public sealed class TravellingToFateStateHandler : IAutomatorStateHandler
 
     public bool CanHandle(AutomatorState state) => state is AutomatorState.SelectingFate or AutomatorState.Travelling;
 
+    public void Reset()
+    {
+        retryAfterByFateId.Clear();
+        failureCountByFateId.Clear();
+        failedInstances.Clear();
+    }
+
     public AutomatorStateHandlerResult Tick(AutomatorContext context)
     {
         return context.State switch
@@ -58,6 +67,12 @@ public sealed class TravellingToFateStateHandler : IAutomatorStateHandler
     private AutomatorStateHandlerResult HandleSelecting(AutomatorContext context)
     {
         var fates = fateRepository.EnumerateActiveFates();
+        foreach (var id in failureCountByFateId.Keys.Where(id => fates.All(f => f.FateId != id)).ToList())
+        {
+            failureCountByFateId.Remove(id);
+            retryAfterByFateId.Remove(id);
+            failedInstances.Remove(id);
+        }
         if (fates.Count == 0)
         {
             travelController.Cancel("No active fates", TravelRequestKind.Automatic);
@@ -105,18 +120,40 @@ public sealed class TravellingToFateStateHandler : IAutomatorStateHandler
         }
 
         var activeFates = fateRepository.EnumerateActiveFates();
-        if (!activeFates.Any(f => f.FateId == selection.Value.Fate.FateId))
+        if (!activeFates.Any(f => IsSameOccurrence(f, selection.Value.Fate)))
         {
             travelController.Cancel("Selected fate is no longer active", TravelRequestKind.Automatic);
             context.ClearSelection("Selected fate ended during travel", log);
             return AutomatorStateHandlerResult.Transition(AutomatorState.SelectingFate, "Selected fate ended during travel");
         }
 
-        var currentFate = activeFates.First(f => f.FateId == selection.Value.Fate.FateId);
-        var job = travelController.CurrentJob;
-        if (currentFate.State == Dalamud.Game.ClientState.Fates.FateState.Running)
+        var currentFate = activeFates.First(f => IsSameOccurrence(f, selection.Value.Fate));
+        var requiredActivation = selection.Value.Fate.RequiresActivation;
+        selection = selection.Value with { Fate = currentFate };
+        if (currentFate.Progress >= 100 || (!context.ReturningAfterRecovery && fateSelector.SelectBest(new[] { currentFate }) == null))
         {
-            if (selection.Value.Fate.RequiresActivation)
+            travelController.Cancel("Selected FATE no longer meets eligibility filters", TravelRequestKind.Automatic);
+            context.ClearSelection("Selected FATE no longer eligible", log);
+            return AutomatorStateHandlerResult.Transition(AutomatorState.SelectingFate, "Selected FATE no longer eligible");
+        }
+
+        var betterSelection = fateSelector.SelectBest(activeFates.Where(CanAttemptTravel).ToList());
+        if (!context.ReturningAfterRecovery && betterSelection is { } candidate &&
+            candidate.Fate.FateId != selection.Value.Fate.FateId &&
+            travelController.Phase is not (TravelPhase.Arrived or TravelPhase.Arriving or TravelPhase.Failed or TravelPhase.Cancelled))
+        {
+            travelController.Cancel("Higher-priority FATE appeared", TravelRequestKind.Automatic);
+            context.UpdateSelection(candidate, "Reprioritized during travel", log);
+            travelController.RequestTravel(candidate);
+            return AutomatorStateHandlerResult.None($"Reprioritized to FATE #{candidate.Fate.FateId}");
+        }
+
+        var job = travelController.CurrentJob;
+        var canRetarget = job is { Kind: TravelRequestKind.Automatic } &&
+            travelController.Phase is TravelPhase.Mounting or TravelPhase.Moving or TravelPhase.Arriving;
+        if (canRetarget && currentFate.State == Dalamud.Game.ClientState.Fates.FateState.Running)
+        {
+            if (requiredActivation)
             {
                 var centerSelection = selection.Value with
                 {
@@ -125,19 +162,20 @@ public sealed class TravellingToFateStateHandler : IAutomatorStateHandler
                     ShouldTeleport = false,
                     PreferredAetheryteId = null
                 };
-                if (job == null || Vector3.Distance(job.Selection.Destination, currentFate.Center) >= 1f)
+                if (job == null || job.ArrivalRadius < 12f || Vector3.Distance(job.Selection.Destination, currentFate.Center) >= 1f)
                 {
                     travelController.RequestTravel(centerSelection);
                 }
 
                 context.UpdateSelection(centerSelection, "FATE started during travel; avoiding motivation NPC", log);
                 selection = centerSelection;
+                job = travelController.CurrentJob;
             }
         }
-        else if (currentFate.State == Dalamud.Game.ClientState.Fates.FateState.Preparing && currentFate.DistanceFromPlayer <= 100f &&
+        else if (canRetarget && currentFate.State == Dalamud.Game.ClientState.Fates.FateState.Preparing && currentFate.DistanceFromPlayer <= 100f &&
                  activationService.TryGetMotivationNpc(currentFate, out var motivationNpc) && motivationNpc != null)
         {
-            if (job == null || Vector3.Distance(job.Selection.Destination, motivationNpc.Position) >= 1f)
+            if (job == null || job.ArrivalRadius != 3f || Vector3.Distance(job.Selection.Destination, motivationNpc.Position) >= 1f)
             {
                 var npcSelection = selection.Value with
                 {
@@ -154,7 +192,11 @@ public sealed class TravellingToFateStateHandler : IAutomatorStateHandler
             }
         }
 
-        var phase = context.TravelPhase;
+        // Refresh the running job's FATE snapshot without restarting completed/failed jobs.
+        if (job != null && job.Kind == TravelRequestKind.Automatic && job.Selection.Fate.FateId == selection.Value.Fate.FateId &&
+            travelController.Phase is not (TravelPhase.Failed or TravelPhase.Cancelled or TravelPhase.Arrived))
+            travelController.RequestTravel(selection.Value, job.Kind, job.ArrivalRadius);
+        var phase = travelController.Phase;
 
         if (job is { Selection: { } jobSelection } && jobSelection.Fate.FateId != selection.Value.Fate.FateId)
         {
@@ -165,6 +207,11 @@ public sealed class TravellingToFateStateHandler : IAutomatorStateHandler
         switch (phase)
         {
             case TravelPhase.Arrived:
+                context.ReturningAfterRecovery = false;
+                context.UpdateSelection(selection.Value, "Arrival FATE snapshot refreshed", log);
+                failureCountByFateId.Remove(selection.Value.Fate.FateId);
+                retryAfterByFateId.Remove(selection.Value.Fate.FateId);
+                failedInstances.Remove(selection.Value.Fate.FateId);
                 return currentFate.State == Dalamud.Game.ClientState.Fates.FateState.Preparing
                     ? AutomatorStateHandlerResult.Transition(AutomatorState.ActivatingFate, $"Arrived at fate #{selection.Value.Fate.FateId}; resolving motivation NPC")
                     : AutomatorStateHandlerResult.Transition(AutomatorState.Participating, $"Arrived at fate #{selection.Value.Fate.FateId}");
@@ -172,9 +219,17 @@ public sealed class TravellingToFateStateHandler : IAutomatorStateHandler
                 context.ClearSelection("Travel cancelled", log);
                 return AutomatorStateHandlerResult.Transition(AutomatorState.SelectingFate, "Travel cancelled");
             case TravelPhase.Failed:
-                RegisterTravelFailure(selection.Value.Fate.FateId);
+                var failureCount = RegisterTravelFailure(selection.Value.Fate);
+                if (failureCount == 2 && selection.Value.Teleport.AetheryteId.HasValue)
+                {
+                    var teleportSelection = selection.Value with { ShouldTeleport = true };
+                    context.UpdateSelection(teleportSelection, "Escalating repeated travel failure to teleport", log);
+                    travelController.RequestTravel(teleportSelection);
+                    return AutomatorStateHandlerResult.None("Retrying failed travel through teleport");
+                }
+
                 context.ClearSelection("Travel failed", log);
-                return AutomatorStateHandlerResult.Transition(AutomatorState.SelectingFate, $"Travel failed ({context.TravelPhaseDetail})");
+                return AutomatorStateHandlerResult.Transition(AutomatorState.SelectingFate, $"Travel failed ({travelController.PhaseDetail})");
         }
 
         if (job == null)
@@ -217,6 +272,12 @@ public sealed class TravellingToFateStateHandler : IAutomatorStateHandler
 
     private bool CanAttemptTravel(ActiveFate fate)
     {
+        if (failedInstances.TryGetValue(fate.FateId, out var instance) && instance != (fate.TerritoryId, fate.StartTimeEpoch))
+        {
+            failedInstances.Remove(fate.FateId);
+            failureCountByFateId.Remove(fate.FateId);
+            retryAfterByFateId.Remove(fate.FateId);
+        }
         if (!retryAfterByFateId.TryGetValue(fate.FateId, out var retryAfter))
         {
             return true;
@@ -231,10 +292,20 @@ public sealed class TravellingToFateStateHandler : IAutomatorStateHandler
         return true;
     }
 
-    private void RegisterTravelFailure(uint fateId)
+    private int RegisterTravelFailure(ActiveFate fate)
     {
+        CanAttemptTravel(fate); // Reset counters for a new occurrence of the same FATE ID.
+        var fateId = fate.FateId;
+        failedInstances[fateId] = (fate.TerritoryId, fate.StartTimeEpoch);
+        var failureCount = failureCountByFateId.TryGetValue(fateId, out var previous) ? previous + 1 : 1;
+        failureCountByFateId[fateId] = failureCount;
         var retryAfter = DateTimeOffset.UtcNow + TravelFailureCooldown;
         retryAfterByFateId[fateId] = retryAfter;
-        log.Warning("Automator: delaying another travel attempt to fate #{FateId} until {RetryAfter:O}", fateId, retryAfter);
+        log.Warning("Automator: delaying travel attempt to fate #{FateId} until {RetryAfter:O} (failure {FailureCount})", fateId, retryAfter, failureCount);
+        return failureCount;
     }
+
+    private static bool IsSameOccurrence(ActiveFate current, ActiveFate selected)
+        => current.FateId == selected.FateId && current.TerritoryId == selected.TerritoryId &&
+           (current.StartTimeEpoch == 0 || selected.StartTimeEpoch == 0 || current.StartTimeEpoch == selected.StartTimeEpoch);
 }

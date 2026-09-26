@@ -20,6 +20,7 @@ public sealed unsafe class TeleportExecutor : ITeleportExecutor, IDisposable
         ConditionFlag.OccupiedInQuestEvent,
         ConditionFlag.InCombat,
         ConditionFlag.Casting,
+        ConditionFlag.Unconscious,
     };
 
     private readonly IClientState clientState;
@@ -32,6 +33,8 @@ public sealed unsafe class TeleportExecutor : ITeleportExecutor, IDisposable
     private TeleportState state = TeleportState.Idle;
     private TeleportRecommendation? pending;
     private DateTimeOffset? issuedAt;
+    private DateTimeOffset? lastCompletedAt;
+    private DateTimeOffset? lastFailedAt;
     private ushort startingTerritory;
 
     public TeleportExecutor(IClientState clientState, ICondition condition, IFramework framework, IPluginLog log)
@@ -45,10 +48,12 @@ public sealed unsafe class TeleportExecutor : ITeleportExecutor, IDisposable
     }
 
     public TeleportState State => state;
+    public DateTimeOffset? LastCompletedAt => lastCompletedAt;
+    public DateTimeOffset? LastFailedAt => lastFailedAt;
 
     public TeleportRequestResult RequestTeleport(in TeleportRecommendation recommendation)
     {
-        if (!recommendation.AetheryteId.HasValue)
+        if (recommendation.AetheryteId is null or 0)
         {
             return TeleportRequestResult.InvalidTarget;
         }
@@ -71,10 +76,17 @@ public sealed unsafe class TeleportExecutor : ITeleportExecutor, IDisposable
 
         try
         {
-            Telepo.Instance()->Teleport(recommendation.AetheryteId.Value, recommendation.SubIndex);
+            var telepo = Telepo.Instance();
+            if (telepo == null) return TeleportRequestResult.ClientUnavailable;
+            if (!telepo->Teleport(recommendation.AetheryteId.Value, recommendation.SubIndex))
+            {
+                lastFailedAt = DateTimeOffset.UtcNow;
+                return TeleportRequestResult.Failed;
+            }
         }
         catch (Exception ex)
         {
+            lastFailedAt = DateTimeOffset.UtcNow;
             log.Error(ex, "TeleportExecutor: failed to invoke Telepo for {Target}", recommendation.AetheryteName ?? recommendation.AetheryteId.Value.ToString());
             TransitionState(TeleportState.Failed);
             return TeleportRequestResult.Failed;
@@ -106,6 +118,11 @@ public sealed unsafe class TeleportExecutor : ITeleportExecutor, IDisposable
 
     private void OnFrameworkUpdate(IFramework framework)
     {
+        if (!clientState.IsLoggedIn)
+        {
+            Reset();
+            return;
+        }
         switch (state)
         {
             case TeleportState.Starting:
@@ -116,21 +133,29 @@ public sealed unsafe class TeleportExecutor : ITeleportExecutor, IDisposable
                 else if (issuedAt.HasValue && DateTimeOffset.UtcNow - issuedAt > TimeSpan.FromSeconds(10))
                 {
                     log.Debug("TeleportExecutor: teleport request timed out before loading started");
+                    lastFailedAt = DateTimeOffset.UtcNow;
                     Reset();
                 }
 
                 break;
             case TeleportState.Loading:
-                if (!condition[ConditionFlag.BetweenAreas])
+                if (!condition[ConditionFlag.BetweenAreas] && !condition[ConditionFlag.BetweenAreas51])
                 {
                     if (clientState.TerritoryType != startingTerritory)
                     {
+                        lastCompletedAt = DateTimeOffset.UtcNow;
                         TransitionState(TeleportState.Completed);
                     }
                     else if (issuedAt.HasValue && DateTimeOffset.UtcNow - issuedAt > SameTerritoryCompletionDelay)
                     {
+                        lastCompletedAt = DateTimeOffset.UtcNow;
                         TransitionState(TeleportState.Completed);
                     }
+                }
+                else if (issuedAt.HasValue && DateTimeOffset.UtcNow - issuedAt > TimeSpan.FromSeconds(45))
+                {
+                    lastFailedAt = DateTimeOffset.UtcNow;
+                    TransitionState(TeleportState.Failed);
                 }
 
                 break;

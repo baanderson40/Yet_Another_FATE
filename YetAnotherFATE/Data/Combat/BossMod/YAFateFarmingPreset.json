@@ -154,7 +154,8 @@
       { "Track": "range", "Option": "20" }
     ],
     "BossMod.Autorotation.MiscAI.FateUtils": [
-      { "Track": "Sync", "Option": "Enable" }
+      { "Track": "Sync", "Option": "Enable" },
+      { "Track": "Collect", "Option": "Disabled" }
     ],
     "BossMod.Autorotation.MiscAI.NormalMovement": [
       { "Track": "Destination", "Option": "Pathfind" },

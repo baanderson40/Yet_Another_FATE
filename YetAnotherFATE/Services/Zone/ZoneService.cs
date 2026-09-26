@@ -60,6 +60,26 @@ public sealed class ZoneService : IZoneService
         return zone;
     }
 
+    public IReadOnlyList<uint> GetRotationTerritories(uint? sameExpansionAs = null)
+    {
+        var territories = dataManager.GetExcelSheet<TerritoryType>();
+        uint? expansion = null;
+        if (sameExpansionAs is { } source)
+        {
+            if (!territories.TryGetRow(source, out var current)) return Array.Empty<uint>();
+            expansion = current.ExVersion.RowId;
+        }
+        var teleportTerritories = dataManager.GetExcelSheet<Aetheryte>()
+            .Where(a => a.IsAetheryte).Select(a => a.Territory.RowId).ToHashSet();
+        // Native intended-use enum: Overworld = 1. Exclude cities, duties,
+        // unused duplicate maps and PvP; require an actual teleport destination.
+        return territories.Where(t => t.IsInUse && !t.IsPvpZone &&
+                t.TerritoryIntendedUse.RowId == (uint)FFXIVClientStructs.FFXIV.Client.Enums.TerritoryIntendedUse.Overworld &&
+                t.Map.RowId != 0 && teleportTerritories.Contains(t.RowId) &&
+                (!expansion.HasValue || t.ExVersion.RowId == expansion))
+            .OrderBy(t => t.RowId).Select(t => t.RowId).ToArray();
+    }
+
     private ZoneStaticInfo? GetOrCreateMetadata(uint territoryId)
     {
         lock (cacheGate)

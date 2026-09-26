@@ -20,6 +20,8 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
     private readonly ITravelController travelController;
     private readonly IChatGui chatGui;
     private readonly IPluginLog log;
+    private readonly IFateRewardTracker rewardTracker;
+    private readonly ZoneRotationController zoneRotation;
 
     public MainCommandDelegate(
         UxModule uxModule,
@@ -30,6 +32,8 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
         INavmeshClient navmeshClient,
         ITravelController travelController,
         IChatGui chatGui,
+        IFateRewardTracker rewardTracker,
+        ZoneRotationController zoneRotation,
         IPluginLog log)
     {
         this.uxModule = uxModule;
@@ -40,6 +44,8 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
         this.navmeshClient = navmeshClient;
         this.travelController = travelController;
         this.chatGui = chatGui;
+        this.rewardTracker = rewardTracker;
+        this.zoneRotation = zoneRotation;
         this.log = log;
     }
 
@@ -96,6 +102,32 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
             return;
         }
 
+        if (string.Equals(trimmed, "run", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!int.TryParse(commandArg, out var count) || count < 1)
+            {
+                chatGui.PrintError("Usage: /yafate run <count>");
+                return;
+            }
+
+            rewardTracker.Start(count);
+            chatGui.Print($"YAFate: running until {count} FATE rewards");
+            return;
+        }
+
+        if (string.Equals(trimmed, "stop", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.Equals(commandArg, "safe", StringComparison.OrdinalIgnoreCase))
+            {
+                rewardTracker.RequestStopWhenSafe();
+                chatGui.Print("YAFate: stop requested; waiting for FATE and combat cleanup");
+                return;
+            }
+            rewardTracker.Stop();
+            chatGui.Print("YAFate: stopped");
+            return;
+        }
+
         uxModule.ToggleMain();
     }
 
@@ -122,6 +154,8 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
             return;
         }
 
+        zoneRotation.Suspend("Debug teleport requested");
+        travelController.Cancel("Debug teleport requested", TravelRequestKind.Automatic);
         var result = teleportExecutor.RequestTeleport(chosen.Teleport);
         chatGui.Print($"Teleport debug: {result} targeting {chosen.Teleport.AetheryteName ?? chosen.Teleport.AetheryteId.Value.ToString()}");
     }
@@ -170,6 +204,7 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
         }
 
         var kind = forceRun ? TravelRequestKind.DebugForceRun : TravelRequestKind.Automatic;
+        zoneRotation.Suspend("Debug movement requested");
         travelController.RequestTravel(chosen, kind);
         chatGui.Print($"Navmesh debug: issued move toward {chosen.Fate.Name} (mode={kind})");
     }

@@ -2,6 +2,7 @@ namespace YetAnotherFATE.Data.Fates;
 
 public readonly record struct SelectionScoreBreakdown(
     double BaseScore,
+    double PriorityAdjustment,
     double DistancePenalty,
     double TimeAdjustment,
     double ActivationPenalty,

@@ -15,6 +15,7 @@ public readonly record struct ActiveFate(
     bool IsContinuation,
     TimeSpan TimeRemaining,
     FateState State,
+    ushort FateChain,
     string Description,
     string Objective,
     byte Progress,
@@ -33,5 +34,20 @@ public readonly record struct ActiveFate(
     uint RequiredEventItem,
     uint TurnInEventItem)
 {
+    // Sheet metadata, not inferred from runtime rules, items, or FATEChain.
+    public bool HasFollowUp { get; init; }
+    public uint LocationId { get; init; }
+    public bool HasSheetMetadata { get; init; }
+    public bool IsOnMap { get; init; }
+    public bool IsPending => !IsOnMap;
+
     public bool RequiresActivation => State == FateState.Preparing;
+
+    public FateRule FateRule => (FateRule)Rule;
+
+    public bool IsCollect => FateRule == FateRule.Collect;
+
+    public bool HasMotivationNpc => MotivationNpc is not 0 and not 0xE0000000;
+
+    public bool HasObjectiveNpc => ObjectiveNpc is not 0 and not 0xE0000000;
 }

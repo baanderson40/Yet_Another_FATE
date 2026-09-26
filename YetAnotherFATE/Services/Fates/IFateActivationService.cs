@@ -11,4 +11,6 @@ public interface IFateActivationService
     bool TryGetMotivationNpc(ActiveFate fate, out IGameObject? npc);
 
     bool Interact(IGameObject npc);
+
+    void ClearOwnedTarget();
 }

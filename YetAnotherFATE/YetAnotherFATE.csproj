@@ -2,11 +2,18 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
     <Version>0.0.0.1</Version>
+    <DevBuildVersion>$([System.DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))</DevBuildVersion>
     <PackageProjectUrl>https://github.com/YAFate/Yet_Another_FATE</PackageProjectUrl>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>YetAnotherFATE.DevBuild</_Parameter1>
+      <_Parameter2>$(DevBuildVersion)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
   </ItemGroup>

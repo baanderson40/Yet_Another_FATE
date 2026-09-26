@@ -7,5 +7,7 @@ public enum AutomatorState
     Travelling,
     ActivatingFate,
     Participating,
+    Recovering,
     PostFate,
+    RotatingZone,
 }

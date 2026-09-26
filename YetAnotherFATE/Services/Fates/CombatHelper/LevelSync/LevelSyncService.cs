@@ -72,11 +72,6 @@ public sealed class LevelSyncService : ILevelSyncService
             return false;
         }
 
-        if (condition[ConditionFlag.InCombat])
-        {
-            return false;
-        }
-
         return true;
     }
 

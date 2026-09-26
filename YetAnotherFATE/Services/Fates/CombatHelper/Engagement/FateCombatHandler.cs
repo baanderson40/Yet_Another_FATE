@@ -12,6 +12,7 @@ public sealed class FateCombatHandler : IFateCombatHandler
     private readonly IFateTargetTracker targetTracker;
     private readonly IPluginLog log;
     private ulong? lastTargetObjectId;
+    private nint? lastTargetAddress;
     private DateTimeOffset nextFailureLogAt = DateTimeOffset.MinValue;
 
     public FateCombatHandler(
@@ -31,7 +32,9 @@ public sealed class FateCombatHandler : IFateCombatHandler
         }
         else
         {
+            ClearOwnedHardTarget();
             lastTargetObjectId = null;
+            lastTargetAddress = null;
         }
 
         return snapshot;
@@ -39,8 +42,22 @@ public sealed class FateCombatHandler : IFateCombatHandler
 
     public void Reset(string reason)
     {
+        ClearOwnedHardTarget();
         targetTracker.Clear(reason);
         lastTargetObjectId = null;
+        lastTargetAddress = null;
+    }
+
+    private unsafe void ClearOwnedHardTarget()
+    {
+        if (lastTargetAddress is not { } ownedAddress)
+            return;
+        var targetSystem = TargetSystem.Instance();
+        if (targetSystem == null)
+            return;
+        var current = targetSystem->GetHardTarget();
+        if (current != null && ownedAddress == (nint)current)
+            targetSystem->SetHardTarget(null, true);
     }
 
     private unsafe void EnsureHardTarget(FateTargetSnapshot snapshot)
@@ -71,6 +88,7 @@ public sealed class FateCombatHandler : IFateCombatHandler
         if (targetSystem->SetHardTarget(desired, true))
         {
             lastTargetObjectId = snapshot.ObjectId;
+            lastTargetAddress = snapshot.GameObjectAddress;
             log.Debug("FateCombatHandler: targeting #{ObjectId} {Name}", snapshot.ObjectId, snapshot.Name);
             return;
         }

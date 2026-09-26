@@ -43,8 +43,10 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
     [PluginService] internal static IChatGui ChatGui { get; private set; } = null!;
     [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
+    [PluginService] internal static IAddonLifecycle AddonLifecycle { get; private set; } = null!;
     [PluginService] internal static IAetheryteList AetheryteList { get; private set; } = null!;
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
+    [PluginService] internal static IPartyList PartyList { get; private set; } = null!;
 
     public Configuration Configuration { get; }
     public WindowSystem WindowSystem { get; } = new("YetAnotherFATE");
@@ -61,7 +63,11 @@ public sealed class Plugin : IDalamudPlugin
 
         var services = new ServiceCollection();
         BootstrapServices(services);
-        serviceProvider = services.BuildServiceProvider();
+        serviceProvider = services.BuildServiceProvider(new ServiceProviderOptions
+        {
+            ValidateOnBuild = true,
+            ValidateScopes = true,
+        });
 
         automatorModule = serviceProvider.GetRequiredService<AutomatorModule>();
         automatorModule.Initialize();
@@ -100,8 +106,10 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton(ObjectTable);
         services.AddSingleton(ChatGui);
         services.AddSingleton(GameGui);
+        services.AddSingleton(AddonLifecycle);
         services.AddSingleton(AetheryteList);
         services.AddSingleton(Condition);
+        services.AddSingleton(PartyList);
 
         services.AddSingleton<ConfigWindow>();
         services.AddSingleton<DebugRenderer>();
@@ -114,6 +122,10 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton<AutomatorChain>();
         services.AddSingleton<IAutomatorStateHandler, TravellingToFateStateHandler>();
         services.AddSingleton<IAutomatorStateHandler, ActivatingFateStateHandler>();
+        services.AddSingleton<IAutomatorStateHandler, RecoveringStateHandler>();
+        services.AddSingleton<IAutomatorStateHandler, RotatingZoneStateHandler>();
+        services.AddSingleton<ZoneRotationController>();
+        services.AddSingleton<AutomaticTravelPolicy>();
         services.AddSingleton<IAutomatorStateHandler, ParticipatingInFateStateHandler>();
 
         services.AddSingleton<IMainCommandDelegate>(provider => new MainCommandDelegate(
@@ -125,6 +137,8 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<INavmeshClient>(),
             provider.GetRequiredService<ITravelController>(),
             provider.GetRequiredService<IChatGui>(),
+            provider.GetRequiredService<IFateRewardTracker>(),
+            provider.GetRequiredService<ZoneRotationController>(),
             provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<IMainCommand, MainCommand>();
 
@@ -133,10 +147,16 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<IPlayerState>(),
             provider.GetRequiredService<IObjectTable>(),
             provider.GetRequiredService<IFateTable>(),
-            provider.GetRequiredService<IPluginLog>()));
+            provider.GetRequiredService<IPluginLog>(),
+            provider.GetRequiredService<IDataManager>()));
+        services.AddSingleton<IFateCompletionTracker, FateCompletionTracker>();
+        services.AddSingleton<IFateRewardTracker, FateRewardTracker>();
+        services.AddSingleton<ITextAdvanceClient, TextAdvanceClient>();
+        services.AddSingleton<IFateFollowUpTracker, FateFollowUpTracker>();
         services.AddSingleton<IFateActivationService>(provider => new FateActivationService(
             provider.GetRequiredService<IObjectTable>(),
-            provider.GetRequiredService<IPluginLog>()));
+            provider.GetRequiredService<IPluginLog>(),
+            provider.GetRequiredService<ICondition>()));
         services.AddSingleton<ICombatPluginRegistry>(provider => new CombatPluginRegistry(
             provider.GetRequiredService<IDalamudPluginInterface>(),
             provider.GetRequiredService<IPluginLog>()));
@@ -148,6 +168,8 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<IPlayerState>(),
             provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<BossModPresetManager>();
+        services.AddSingleton<IBossModObstacleMap, BossModObstacleMap>();
+        services.AddSingleton<FateObstacleMapAssurance>();
         services.AddSingleton<IFateTargetTracker>(provider => new FateTargetTracker(
             provider.GetRequiredService<IObjectTable>(),
             provider.GetRequiredService<IClientState>(),
@@ -158,8 +180,11 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton<IFateDebugReporter, FateDebugReporter>();
         services.AddSingleton<IFateSelector>(provider => new FateSelector(
             provider.GetRequiredService<IPlayerState>(),
+            provider.GetRequiredService<IDataManager>(),
+            provider.GetRequiredService<IObjectTable>(),
             provider.GetRequiredService<ITeleportAdvisor>(),
             provider.GetRequiredService<Configuration>(),
+            provider.GetRequiredService<IFateFollowUpTracker>(),
             provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<IZoneService>(provider => new ZoneService(
             provider.GetRequiredService<IDataManager>(),
@@ -173,6 +198,9 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<ICondition>(),
             provider.GetRequiredService<IFramework>(),
             provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<ICityReturnPlanner, CityReturnPlanner>();
+        services.AddSingleton<ICityAethernetClient, LifestreamAethernetClient>();
+        services.AddSingleton<CityDeathReturnRoute>();
         services.AddSingleton<ITravelController>(provider => new TravelController(
             provider.GetRequiredService<ITeleportExecutor>(),
             provider.GetRequiredService<INavmeshClient>(),
@@ -181,6 +209,8 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<IObjectTable>(),
             provider.GetRequiredService<IFramework>(),
             provider.GetRequiredService<IGameGui>(),
+            provider.GetRequiredService<IBossModObstacleMap>(),
+            provider.GetRequiredService<AutomaticTravelPolicy>(),
             provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<ILevelSyncService>(provider => new LevelSyncService(
             provider.GetRequiredService<IPlayerState>(),

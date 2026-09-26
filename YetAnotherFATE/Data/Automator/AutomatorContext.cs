@@ -9,6 +9,8 @@ public sealed class AutomatorContext
 {
     public AutomatorState State { get; private set; } = AutomatorState.Disabled;
     public FateSelection? CurrentSelection { get; private set; }
+    public bool ReturningAfterRecovery { get; set; }
+    public DeathRecoveryContext? DeathRecovery { get; set; }
     public DateTimeOffset LastStateChangedAt { get; private set; } = DateTimeOffset.MinValue;
     public string? LastStateReason { get; private set; }
     public DateTimeOffset? SelectionUpdatedAt { get; private set; }
@@ -61,13 +63,16 @@ public sealed class AutomatorContext
 
         log.Debug("Automator: clearing selection ({Reason})", reason);
         CurrentSelection = null;
+        ReturningAfterRecovery = false;
         SelectionUpdatedAt = DateTimeOffset.UtcNow;
         SelectionReason = reason;
     }
 
     public void Reset(IPluginLog log)
     {
+        DeathRecovery = null;
         CurrentSelection = null;
+        ReturningAfterRecovery = false;
         SelectionUpdatedAt = null;
         SelectionReason = null;
         State = AutomatorState.Disabled;

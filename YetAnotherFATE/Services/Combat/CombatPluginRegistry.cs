@@ -12,6 +12,8 @@ public sealed class CombatPluginRegistry : ICombatPluginRegistry
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly IPluginLog log;
     private readonly List<CombatPluginStatus> statuses = new();
+    private readonly Dictionary<CombatPluginId, CombatPluginStatus> lastLoggedStatuses = new();
+    private DateTimeOffset nextRuntimeRefresh;
 
     private static readonly CombatPluginMetadata[] KnownPlugins =
     {
@@ -29,13 +31,24 @@ public sealed class CombatPluginRegistry : ICombatPluginRegistry
         Refresh();
     }
 
-    public IReadOnlyList<CombatPluginStatus> Statuses => statuses;
+    public IReadOnlyList<CombatPluginStatus> Statuses
+    {
+        get
+        {
+            RefreshIfStale();
+            return statuses;
+        }
+    }
 
     public CombatPluginStatus? GetStatus(CombatPluginId id)
-        => statuses.FirstOrDefault(s => s.Id == id);
+    {
+        RefreshIfStale();
+        return statuses.FirstOrDefault(s => s.Id == id);
+    }
 
     public CombatPluginStatus? GetPreferredRotation(CombatPluginId preferred)
     {
+        RefreshIfStale();
         if (preferred != CombatPluginId.None)
         {
             var configured = GetStatus(preferred);
@@ -50,6 +63,7 @@ public sealed class CombatPluginRegistry : ICombatPluginRegistry
 
     public CombatPluginStatus? GetPreferredDodge(CombatPluginId preferred)
     {
+        RefreshIfStale();
         if (preferred != CombatPluginId.None)
         {
             var configured = GetStatus(preferred);
@@ -64,6 +78,7 @@ public sealed class CombatPluginRegistry : ICombatPluginRegistry
 
     public void Refresh()
     {
+        nextRuntimeRefresh = DateTimeOffset.UtcNow.AddSeconds(2);
         statuses.Clear();
         var installed = pluginInterface.InstalledPlugins;
 
@@ -86,15 +101,25 @@ public sealed class CombatPluginRegistry : ICombatPluginRegistry
                 loaded);
 
             statuses.Add(status);
-            log.Debug("CombatPluginRegistry: {Name} internalName={InternalName} version={Version} installed={Installed} loaded={Loaded} supportsRotation={Rot} supportsDodge={Dodge}",
-                status.DisplayName,
-                status.InternalName,
-                status.Version ?? "n/a",
-                status.Installed,
-                status.IsLoaded,
-                status.SupportsRotation,
-                status.SupportsDodge);
+            if (!lastLoggedStatuses.TryGetValue(status.Id, out var previous) || previous != status)
+            {
+                log.Debug("CombatPluginRegistry: {Name} internalName={InternalName} version={Version} installed={Installed} loaded={Loaded} supportsRotation={Rot} supportsDodge={Dodge}",
+                    status.DisplayName,
+                    status.InternalName,
+                    status.Version ?? "n/a",
+                    status.Installed,
+                    status.IsLoaded,
+                    status.SupportsRotation,
+                    status.SupportsDodge);
+                lastLoggedStatuses[status.Id] = status;
+            }
         }
+    }
+
+    private void RefreshIfStale()
+    {
+        if (DateTimeOffset.UtcNow >= nextRuntimeRefresh)
+            Refresh();
     }
 
     private sealed record CombatPluginMetadata(

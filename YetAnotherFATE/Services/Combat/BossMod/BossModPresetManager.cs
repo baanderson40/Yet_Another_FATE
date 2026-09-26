@@ -1,364 +1,394 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
+using YetAnotherFATE.Config;
 using YetAnotherFATE.Data.Combat;
 
 namespace YetAnotherFATE.Services.Combat.BossMod;
 
 public sealed class BossModPresetManager : IDisposable
 {
-    private const string CreateEndpoint = "BossMod.Presets.Create";
-    private const string DeleteEndpoint = "BossMod.Presets.Delete";
-    private const string SetActiveEndpoint = "BossMod.Presets.SetActive";
-    private const string GetActiveListEndpoint = "BossMod.Presets.GetActiveList";
-    private const string SetActiveListEndpoint = "BossMod.Presets.SetActiveList";
-
     private const string RotationPresetName = "YAFate Farming";
     private const string PassivePresetName = "YAFate Passive";
-
+    private const string AutoTarget = "BossMod.Autorotation.MiscAI.AutoTarget";
+    private const string FateUtils = "BossMod.Autorotation.MiscAI.FateUtils";
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly ICombatPluginRegistry combatPlugins;
+    private readonly Configuration configuration;
     private readonly IPluginLog log;
-    private readonly string rotationPresetPath;
-    private readonly string passivePresetPath;
-
-    private ICallGateSubscriber<string, bool, bool>? createPresetSubscriber;
-    private ICallGateSubscriber<string, bool>? deletePresetSubscriber;
-    private ICallGateSubscriber<string, bool>? setActiveSubscriber;
-    private ICallGateSubscriber<System.Collections.Generic.List<string>>? getActiveListSubscriber;
-    private ICallGateSubscriber<System.Collections.Generic.List<string>, bool>? setActiveListSubscriber;
-    private System.Collections.Generic.List<string>? previousActivePresets;
+    private readonly IPlayerState playerState;
+    private readonly HashSet<string> ownedPresets = new();
+    private readonly HashSet<string> availablePresets = new();
+    private readonly Dictionary<(string Preset, string Module, string Track), string> strategies = new();
+    private List<string>? previousActivePresets;
+    private bool previousForceDisabled;
+    private bool listProvider;
     private string? activePresetName;
-    private bool presetsCreated;
-    private bool rotationPresetCreated;
-    private bool passivePresetCreated;
     private bool disposed;
+    private DateTimeOffset retryAfter;
+    private DateTimeOffset strategyRetryAfter;
+    private DateTimeOffset nextStrategyReconcile;
+    private bool forceStrategyRefresh;
 
-    public bool PresetsCreated => presetsCreated && !disposed;
+    public bool PresetsCreated => !disposed && availablePresets.Contains(RotationPresetName) && availablePresets.Contains(PassivePresetName);
 
-    public BossModPresetManager(
-        IDalamudPluginInterface pluginInterface,
-        ICombatPluginRegistry combatPlugins,
-        IPluginLog log)
+    public BossModPresetManager(IDalamudPluginInterface pluginInterface, ICombatPluginRegistry combatPlugins, Configuration configuration, IPluginLog log, IPlayerState playerState)
     {
         this.pluginInterface = pluginInterface;
         this.combatPlugins = combatPlugins;
+        this.configuration = configuration;
         this.log = log;
-
-        var baseDir = pluginInterface.AssemblyLocation.DirectoryName ?? string.Empty;
-        rotationPresetPath = Path.Combine(baseDir, "Data", "Combat", "BossMod", "YAFateFarmingPreset.json");
-        passivePresetPath = Path.Combine(baseDir, "Data", "Combat", "BossMod", "YAFatePassivePreset.json");
+        this.playerState = playerState;
     }
 
     public void EnsurePresets()
     {
-        if (disposed || presetsCreated)
-        {
-            return;
-        }
-
+        if (disposed || PresetsCreated || DateTimeOffset.UtcNow < retryAfter) return;
+        retryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
         combatPlugins.Refresh();
-        if (!IsBossModAvailable())
-        {
-            log.Debug("BossModPresetManager: BossMod/BMR not detected, skipping preset creation");
-            return;
-        }
-
-        if (!EnsureIpc())
-        {
-            log.Debug("BossModPresetManager: IPC unavailable; cannot create presets");
-            return;
-        }
-
-        var rotationDefinition = LoadPreset(rotationPresetPath);
-        var passiveDefinition = LoadPreset(passivePresetPath);
-        if (rotationDefinition == null || passiveDefinition == null)
-        {
-            log.Warning("BossModPresetManager: preset definitions not found; skipping creation");
-            return;
-        }
-
+        if (!combatPlugins.Statuses.Any(s => (s.Id == CombatPluginId.BossMod || s.Id == CombatPluginId.BossModReborn) && s.Installed && s.IsLoaded)) return;
         try
         {
-            rotationPresetCreated = createPresetSubscriber!.InvokeFunc(rotationDefinition, false);
-            passivePresetCreated = createPresetSubscriber.InvokeFunc(passiveDefinition, false);
-            presetsCreated = rotationPresetCreated && passivePresetCreated;
+            var create = pluginInterface.GetIpcSubscriber<string, bool, bool>("BossMod.Presets.Create");
+            if (!create.HasFunction) return;
+            EnsureAvailable(RotationPresetName, "YAFateFarmingPreset.json", create);
+            EnsureAvailable(PassivePresetName, "YAFatePassivePreset.json", create);
+            if (PresetsCreated) retryAfter = DateTimeOffset.MinValue;
+        }
+        catch (Exception ex) { log.Warning(ex, "BossModPresetManager: preset creation failed"); }
+    }
 
-            if (!presetsCreated)
+    private void EnsureAvailable(string name, string filename, ICallGateSubscriber<string, bool, bool> create)
+    {
+        if (availablePresets.Contains(name)) return;
+        try
+        {
+            var get = pluginInterface.GetIpcSubscriber<string, string?>("BossMod.Presets.Get");
+            if (get.HasFunction && get.InvokeFunc(name) != null)
             {
-                // We only clean up names this process created; pre-existing user presets are never overwritten or deleted.
-                if (rotationPresetCreated)
-                {
-                    TryDeletePreset(RotationPresetName);
-                    rotationPresetCreated = false;
-                }
-
-                if (passivePresetCreated)
-                {
-                    TryDeletePreset(PassivePresetName);
-                    passivePresetCreated = false;
-                }
+                // Existing preset may belong to the user. It is usable, but never delete it.
+                availablePresets.Add(name);
+                return;
             }
-
-            log.Debug("BossModPresetManager: created presets rotation={RotationResult} passive={PassiveResult}", rotationPresetCreated, passivePresetCreated);
         }
         catch (Exception ex)
         {
-            log.Warning(ex, "BossModPresetManager: failed to create presets");
-            if (rotationPresetCreated)
+            log.Debug(ex, "BossModPresetManager: existing-preset lookup failed for {Preset}", name);
+        }
+
+        var path = Path.Combine(pluginInterface.AssemblyLocation.DirectoryName ?? string.Empty, "Data", "Combat", "BossMod", filename);
+        // Keep provider defaults (Hand-in, Chocobo) and explicit Sync=Enable intact.
+        // Collection is explicitly disabled in both YAF presets and at runtime.
+        // Policy changes are reversible transient overrides, not mutations of the base definition.
+        if (create.InvokeFunc(File.ReadAllText(path), false))
+        {
+            ownedPresets.Add(name);
+            availablePresets.Add(name);
+        }
+        else log.Warning("BossModPresetManager: could not create {Preset}; existing presets are not overwritten", name);
+    }
+
+    public void ActivateRotationPreset() => ActivatePreset(RotationPresetName);
+    public void ActivatePassivePreset() => ActivatePreset(PassivePresetName);
+    public void DeactivateActivePreset() => DeactivatePreset();
+
+    private void ActivatePreset(string name)
+    {
+        if (disposed) return;
+        if (!PresetsCreated) EnsurePresets();
+        if (!PresetsCreated) return;
+        if (activePresetName == name && IsProviderPresetActive(name))
+        {
+            if (DateTimeOffset.UtcNow >= nextStrategyReconcile)
             {
-                TryDeletePreset(RotationPresetName);
-                rotationPresetCreated = false;
+                strategies.Keys.Where(k => k.Preset == name).ToList().ForEach(k => strategies.Remove(k));
+                strategyRetryAfter = DateTimeOffset.MinValue;
+                nextStrategyReconcile = DateTimeOffset.UtcNow.AddSeconds(5);
+            }
+            ApplyFateTargetLimit();
+            return;
+        }
+        if (activePresetName == name && !IsProviderPresetActive(name))
+        {
+            if (HasExternalActivePreset())
+            {
+                // Another user/plugin took control. Do not overwrite it or restore
+                // the snapshot captured before that external change.
+                ClearOwnedStrategies(name);
+                activePresetName = null;
+                previousActivePresets = null;
+                log.Debug("BossModPresetManager: relinquishing ownership after external preset change");
+                return;
+            }
+            if (!ReapplyActivePreset(name))
+                return;
+        }
+        if (activePresetName == name)
+        {
+            ApplyFateTargetLimit();
+            return;
+        }
+        if (DateTimeOffset.UtcNow < retryAfter) return;
+        if (activePresetName != null && !DeactivatePreset()) return;
+        try
+        {
+            var getList = pluginInterface.GetIpcSubscriber<List<string>>("BossMod.Presets.GetActiveList");
+            var setList = pluginInterface.GetIpcSubscriber<List<string>, bool>("BossMod.Presets.SetActiveList");
+            listProvider = getList.HasFunction && setList.HasFunction;
+            // Capture must succeed before changing global state. BMR has only single-preset IPC.
+            if (listProvider)
+            {
+                previousActivePresets = new(getList.InvokeFunc());
+            }
+            else
+            {
+                var active = pluginInterface.GetIpcSubscriber<string?>("BossMod.Presets.GetActive").InvokeFunc();
+                previousForceDisabled = pluginInterface.GetIpcSubscriber<bool>("BossMod.Presets.GetForceDisabled").InvokeFunc();
+                previousActivePresets = active == null || previousForceDisabled ? new() : new() { active };
+            }
+            try
+            {
+                var force = pluginInterface.GetIpcSubscriber<bool>("BossMod.Presets.GetForceDisabled");
+                if (force.HasFunction)
+                    previousForceDisabled = force.InvokeFunc();
+            }
+            catch { previousForceDisabled = false; }
+            var activated = listProvider ? setList.InvokeFunc(new() { name })
+                : pluginInterface.GetIpcSubscriber<string, bool>("BossMod.Presets.SetActive").InvokeFunc(name);
+            if (!activated) throw new InvalidOperationException($"Activation rejected for {name}");
+            activePresetName = name;
+            strategyRetryAfter = DateTimeOffset.MinValue;
+            nextStrategyReconcile = DateTimeOffset.UtcNow.AddSeconds(5);
+            forceStrategyRefresh = true;
+            ApplyFateTargetLimit();
+        }
+        catch (Exception ex)
+        {
+            retryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
+            log.Warning(ex, "BossModPresetManager: activation failed");
+        }
+    }
+
+    private bool IsProviderPresetActive(string name)
+    {
+        try
+        {
+            if (listProvider)
+            {
+                var getList = pluginInterface.GetIpcSubscriber<List<string>>("BossMod.Presets.GetActiveList");
+                return getList.HasFunction && getList.InvokeFunc().Contains(name, StringComparer.Ordinal);
             }
 
-            if (passivePresetCreated)
+            var get = pluginInterface.GetIpcSubscriber<string?>("BossMod.Presets.GetActive");
+            return get.HasFunction && string.Equals(get.InvokeFunc(), name, StringComparison.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "BossModPresetManager: active preset lookup failed");
+            return false;
+        }
+    }
+
+    private bool ReapplyActivePreset(string name)
+    {
+        try
+        {
+            var setList = pluginInterface.GetIpcSubscriber<List<string>, bool>("BossMod.Presets.SetActiveList");
+            if (listProvider && setList.HasFunction)
+                return setList.InvokeFunc(new() { name });
+            return pluginInterface.GetIpcSubscriber<string, bool>("BossMod.Presets.SetActive").InvokeFunc(name);
+        }
+        catch (Exception ex)
+        {
+            retryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
+            log.Warning(ex, "BossModPresetManager: active preset reconciliation failed for {Preset}", name);
+            return false;
+        }
+    }
+
+    private bool HasExternalActivePreset()
+    {
+        try
+        {
+            if (listProvider)
             {
-                TryDeletePreset(PassivePresetName);
-                passivePresetCreated = false;
+                var list = pluginInterface.GetIpcSubscriber<List<string>>("BossMod.Presets.GetActiveList");
+                return list.HasFunction && list.InvokeFunc().Count > 0;
+            }
+
+            var active = pluginInterface.GetIpcSubscriber<string?>("BossMod.Presets.GetActive");
+            return active.HasFunction && active.InvokeFunc() != null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void ClearOwnedStrategies(string preset)
+    {
+        foreach (var key in strategies.Keys.Where(k => k.Preset == preset).ToList())
+        {
+            try
+            {
+                pluginInterface.GetIpcSubscriber<string, string, string, bool>("BossMod.Presets.ClearTransientStrategy")
+                    .InvokeFunc(key.Preset, key.Module, key.Track);
+                strategies.Remove(key);
+            }
+            catch (Exception ex)
+            {
+                log.Warning(ex, "BossModPresetManager: failed to clear abandoned transient strategy {Module}/{Track}", key.Module, key.Track);
             }
         }
     }
 
-    public void Dispose()
+    public void ApplyFateTargetLimit()
     {
-        if (disposed)
+        if (activePresetName == null || DateTimeOffset.UtcNow < strategyRetryAfter) return;
+        try
         {
-            return;
+            var success = true;
+            var killOnly = configuration.CollectionPolicy == FateCollectionPolicy.KillOnly;
+            if (activePresetName == RotationPresetName)
+            {
+                var limit = configuration.BossModTargetsByRole
+                    ? TargetsForRole(playerState.IsLoaded && playerState.ClassJob.IsValid ? playerState.ClassJob.Value.Role : (byte)0)
+                    : Math.Clamp(configuration.BossModMaxTargets, 0, 20);
+                success &= SetStrategy(AutoTarget, "MaxTargets", limit.ToString(CultureInfo.InvariantCulture));
+                success &= SetStrategy(AutoTarget, "CollectFATE", killOnly ? "Disabled" : null);
+            }
+            // YAF owns collection targeting and interaction. Keep FateUtils collection disabled
+            // even when the user allows collection, preventing BossMod from fighting YAF's target.
+            success &= SetStrategy(FateUtils, "Collect", "Disabled");
+            if (!success)
+            {
+                strategyRetryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
+                log.Debug("BossModPresetManager: transient strategy rejected; retrying later");
+            }
+            else
+            {
+                forceStrategyRefresh = false;
+            }
         }
+        catch (Exception ex)
+        {
+            strategyRetryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
+            log.Debug(ex, "BossModPresetManager: transient strategy unavailable");
+        }
+    }
 
-        disposed = true;
-        ReleasePresets();
+    private bool SetStrategy(string module, string track, string? value)
+    {
+        var key = (activePresetName!, module, track);
+        if (value == null)
+        {
+            if (!strategies.ContainsKey(key)) return true;
+            // False also means the track is already absent; a missing endpoint throws.
+            pluginInterface.GetIpcSubscriber<string, string, string, bool>("BossMod.Presets.ClearTransientStrategy").InvokeFunc(key.Item1, module, track);
+            strategies.Remove(key);
+            return true;
+        }
+        if (!forceStrategyRefresh && strategies.TryGetValue(key, out var applied) && applied == value) return true;
+        if (!pluginInterface.GetIpcSubscriber<string, string, string, string, bool>("BossMod.Presets.AddTransientStrategy").InvokeFunc(key.Item1, module, track, value)) return false;
+        strategies[key] = value;
+        return true;
+    }
+
+    // Lumina ClassJob.Role: 1 tank, 2 healer, 3 melee DPS, 4 physical-ranged DPS,
+    // 5 magical-ranged DPS. BossMod uses zero for unlimited tank pulls.
+    public static int TargetsForRole(byte role) => role switch { 1 => 0, 2 => 5, 3 or 4 or 5 => 3, _ => 1 };
+
+    private bool DeactivatePreset()
+    {
+        if (activePresetName == null) return true;
+        if (DateTimeOffset.UtcNow < retryAfter) return false;
+        try
+        {
+            foreach (var key in strategies.Keys.Where(k => k.Preset == activePresetName).ToList())
+            {
+                // Provider false means the transient track is already absent.
+                // Either result invalidates our local cache; exceptions retain it
+                // through the outer catch for a later retry.
+                pluginInterface.GetIpcSubscriber<string, string, string, bool>("BossMod.Presets.ClearTransientStrategy").InvokeFunc(key.Preset, key.Module, key.Track);
+                strategies.Remove(key);
+            }
+            bool restored;
+            if (listProvider)
+            {
+                restored = pluginInterface.GetIpcSubscriber<List<string>, bool>("BossMod.Presets.SetActiveList").InvokeFunc(new(previousActivePresets!));
+                if (restored)
+                {
+                    if (previousForceDisabled)
+                    {
+                        var setForce = pluginInterface.GetIpcSubscriber<bool>("BossMod.Presets.SetForceDisabled");
+                        restored = setForce.InvokeFunc() || pluginInterface.GetIpcSubscriber<bool>("BossMod.Presets.GetForceDisabled").InvokeFunc();
+                    }
+                }
+            }
+            else if (previousForceDisabled)
+            {
+                var force = pluginInterface.GetIpcSubscriber<bool>("BossMod.Presets.GetForceDisabled");
+                restored = force.InvokeFunc() || pluginInterface.GetIpcSubscriber<bool>("BossMod.Presets.SetForceDisabled").InvokeFunc();
+            }
+            else if (previousActivePresets is { Count: > 0 })
+                restored = pluginInterface.GetIpcSubscriber<string, bool>("BossMod.Presets.SetActive").InvokeFunc(previousActivePresets[0]);
+            else
+            {
+                var get = pluginInterface.GetIpcSubscriber<string?>("BossMod.Presets.GetActive");
+                restored = get.InvokeFunc() == null || pluginInterface.GetIpcSubscriber<bool>("BossMod.Presets.ClearActive").InvokeFunc();
+            }
+            if (!restored) throw new InvalidOperationException("Previous preset restore rejected; retaining snapshot for retry");
+            activePresetName = null;
+            previousActivePresets = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            retryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
+            log.Warning(ex, "BossModPresetManager: restore failed; owned preset and previous state retained");
+            return false;
+        }
     }
 
     public void ReleasePresets()
     {
-        DeactivatePreset();
-
-        if (!presetsCreated)
-        {
-            return;
-        }
-
-        combatPlugins.Refresh();
-        if (!IsBossModAvailable() || !EnsureIpc())
-        {
-            log.Debug("BossModPresetManager: presets were created but BossMod/BMR unavailable during cleanup");
-            return;
-        }
-
-        if (rotationPresetCreated)
-        {
-            TryDeletePreset(RotationPresetName);
-        }
-
-        if (passivePresetCreated)
-        {
-            TryDeletePreset(PassivePresetName);
-        }
-
-        presetsCreated = false;
-        rotationPresetCreated = false;
-        passivePresetCreated = false;
-    }
-
-    public void ActivateRotationPreset()
-    {
-        ActivatePreset(RotationPresetName);
-    }
-
-    public void ActivatePassivePreset()
-    {
-        ActivatePreset(PassivePresetName);
-    }
-
-    public void DeactivateActivePreset()
-    {
-        DeactivatePreset();
-    }
-
-    private void ActivatePreset(string presetName)
-    {
-        if (!PresetsCreated)
-        {
-            EnsurePresets();
-        }
-
-        if (!PresetsCreated || !EnsureActivationIpc())
-        {
-            return;
-        }
-
-        if (activePresetName == presetName)
-        {
-            return;
-        }
-
-        if (activePresetName != null)
-        {
-            DeactivatePreset();
-        }
-
-        try
-        {
-            previousActivePresets = getActiveListSubscriber?.InvokeFunc();
-        }
-        catch (Exception ex)
-        {
-            log.Warning(ex, "BossModPresetManager: failed to capture active preset list");
-        }
-
-        try
-        {
-            var result = setActiveSubscriber!.InvokeFunc(presetName);
-            if (result)
-            {
-                activePresetName = presetName;
-            }
-            log.Debug("BossModPresetManager: SetActive {Preset} => {Result}", presetName, result);
-        }
-        catch (Exception ex)
-        {
-            log.Warning(ex, "BossModPresetManager: failed to activate preset {Preset}", presetName);
-        }
-    }
-
-    private void DeactivatePreset()
-    {
-        if (activePresetName == null || !EnsureActivationIpc())
-        {
-            return;
-        }
-
-        var restored = false;
-        if (previousActivePresets is { Count: > 0 } list)
+        if (DateTimeOffset.UtcNow < retryAfter) return;
+        if (!DeactivatePreset()) return;
+        foreach (var name in ownedPresets.ToList())
         {
             try
             {
-                restored = setActiveListSubscriber?.InvokeFunc(new System.Collections.Generic.List<string>(list)) ?? false;
+                // False means the named user preset is already absent.
+                var deleted = pluginInterface.GetIpcSubscriber<string, bool>("BossMod.Presets.Delete").InvokeFunc(name);
+                if (!deleted)
+                {
+                    // Provider reports absent as false; treat it as completed cleanup.
+                    ownedPresets.Remove(name);
+                    availablePresets.Remove(name);
+                    continue;
+                }
+                ownedPresets.Remove(name);
+                availablePresets.Remove(name);
             }
             catch (Exception ex)
             {
-                log.Warning(ex, "BossModPresetManager: failed to restore previous preset list");
+                retryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
+                log.Warning(ex, "BossModPresetManager: deletion failed for {Preset}", name);
             }
         }
-
-        if (!restored)
-        {
-            try
-            {
-                restored = setActiveListSubscriber?.InvokeFunc(new System.Collections.Generic.List<string>()) ?? false;
-            }
-            catch (Exception ex)
-            {
-                log.Warning(ex, "BossModPresetManager: failed to clear preset list");
-            }
-        }
-
-        activePresetName = null;
-        previousActivePresets = null;
-        log.Debug("BossModPresetManager: preset released (restored={Restored})", restored);
+        if (ownedPresets.Count == 0) retryAfter = DateTimeOffset.MinValue;
     }
 
-    private void TryDeletePreset(string name)
+    public void Dispose()
     {
-        try
-        {
-            var result = deletePresetSubscriber!.InvokeFunc(name);
-            log.Debug("BossModPresetManager: deleted preset {Name} => {Result}", name, result);
-        }
-        catch (Exception ex)
-        {
-            log.Warning(ex, "BossModPresetManager: failed to delete preset {Name}", name);
-        }
-    }
-
-    private string? LoadPreset(string path)
-    {
-        if (!File.Exists(path))
-        {
-            log.Warning("BossModPresetManager: preset file missing {Path}", path);
-            return null;
-        }
-
-        try
-        {
-            return File.ReadAllText(path);
-        }
-        catch (Exception ex)
-        {
-            log.Warning(ex, "BossModPresetManager: failed to read preset file {Path}", path);
-            return null;
-        }
-    }
-
-    private bool EnsureIpc()
-    {
-        try
-        {
-            createPresetSubscriber ??= pluginInterface.GetIpcSubscriber<string, bool, bool>(CreateEndpoint);
-        }
-        catch (Exception ex)
-        {
-            log.Debug(ex, "BossModPresetManager: failed to hook {Endpoint}", CreateEndpoint);
-        }
-
-        try
-        {
-            deletePresetSubscriber ??= pluginInterface.GetIpcSubscriber<string, bool>(DeleteEndpoint);
-        }
-        catch (Exception ex)
-        {
-            log.Debug(ex, "BossModPresetManager: failed to hook {Endpoint}", DeleteEndpoint);
-        }
-
-        return createPresetSubscriber != null && deletePresetSubscriber != null;
-    }
-
-    private bool EnsureActivationIpc()
-    {
-        if (setActiveSubscriber != null && getActiveListSubscriber != null && setActiveListSubscriber != null)
-        {
-            return true;
-        }
-
-        try
-        {
-            setActiveSubscriber ??= pluginInterface.GetIpcSubscriber<string, bool>(SetActiveEndpoint);
-        }
-        catch (Exception ex)
-        {
-            log.Debug(ex, "BossModPresetManager: failed to hook {Endpoint}", SetActiveEndpoint);
-        }
-
-        try
-        {
-            getActiveListSubscriber ??= pluginInterface.GetIpcSubscriber<System.Collections.Generic.List<string>>(GetActiveListEndpoint);
-        }
-        catch (Exception ex)
-        {
-            log.Debug(ex, "BossModPresetManager: failed to hook {Endpoint}", GetActiveListEndpoint);
-        }
-
-        try
-        {
-            setActiveListSubscriber ??= pluginInterface.GetIpcSubscriber<System.Collections.Generic.List<string>, bool>(SetActiveListEndpoint);
-        }
-        catch (Exception ex)
-        {
-            log.Debug(ex, "BossModPresetManager: failed to hook {Endpoint}", SetActiveListEndpoint);
-        }
-
-        return setActiveSubscriber != null && getActiveListSubscriber != null && setActiveListSubscriber != null;
-    }
-
-    private bool IsBossModAvailable()
-    {
-        return combatPlugins.Statuses.Any(s =>
-            (s.Id == CombatPluginId.BossMod || s.Id == CombatPluginId.BossModReborn) &&
-            s.Installed && s.IsLoaded);
+        if (disposed) return;
+        disposed = true;
+        retryAfter = DateTimeOffset.MinValue;
+        ReleasePresets();
     }
 }

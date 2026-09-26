@@ -20,6 +20,7 @@ public sealed class RotationSolverBridge : IRotationSolverBridge
     private ICallGateSubscriber<int, int, object?>? autodutySubscriber;
     private uint? engagedFateId;
     private bool autoEngaged;
+    private DateTimeOffset nextEngageRefresh;
 
     public RotationSolverBridge(IDalamudPluginInterface pluginInterface, Dalamud.Plugin.Services.IPluginLog log)
     {
@@ -29,7 +30,7 @@ public sealed class RotationSolverBridge : IRotationSolverBridge
 
     public void EngageNearestAuto(FateSelection selection)
     {
-        if (engagedFateId == selection.Fate.FateId)
+        if (engagedFateId == selection.Fate.FateId && DateTimeOffset.UtcNow < nextEngageRefresh)
         {
             return;
         }
@@ -44,6 +45,7 @@ public sealed class RotationSolverBridge : IRotationSolverBridge
             autodutySubscriber?.InvokeAction(StateAuto, TargetNearest);
             engagedFateId = selection.Fate.FateId;
             autoEngaged = true;
+            nextEngageRefresh = DateTimeOffset.UtcNow.AddSeconds(5);
             log.Debug("RotationSolverBridge: engaged auto targeting for fate #{FateId}", selection.Fate.FateId);
         }
         catch (Exception ex)
@@ -64,15 +66,12 @@ public sealed class RotationSolverBridge : IRotationSolverBridge
         try
         {
             autodutySubscriber?.InvokeAction(StateOff, TargetNearest);
+            autoEngaged = false;
             log.Debug("RotationSolverBridge: disengaged auto mode");
         }
         catch (Exception ex)
         {
             log.Warning(ex, "RotationSolverBridge: failed to disengage auto mode");
-        }
-        finally
-        {
-            autoEngaged = false;
         }
     }
 

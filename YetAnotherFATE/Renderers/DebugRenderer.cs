@@ -24,8 +24,10 @@ public sealed class DebugRenderer
     private readonly ITeleportExecutor teleportExecutor;
     private readonly INavmeshClient navmeshClient;
     private readonly IFateActivationService fateActivationService;
+    private readonly IFateFollowUpTracker followUpTracker;
     private readonly ICombatPluginRegistry combatPlugins;
     private readonly AutomatorChain automatorChain;
+    private readonly IFateRewardTracker rewardTracker;
     private int selectedSection;
 
     public DebugRenderer(
@@ -36,8 +38,10 @@ public sealed class DebugRenderer
         ITeleportExecutor teleportExecutor,
         INavmeshClient navmeshClient,
         IFateActivationService fateActivationService,
+        IFateFollowUpTracker followUpTracker,
         ICombatPluginRegistry combatPlugins,
-        AutomatorChain automatorChain)
+        AutomatorChain automatorChain,
+        IFateRewardTracker rewardTracker)
     {
         this.fateRepository = fateRepository;
         this.fateSelector = fateSelector;
@@ -46,8 +50,10 @@ public sealed class DebugRenderer
         this.teleportExecutor = teleportExecutor;
         this.navmeshClient = navmeshClient;
         this.fateActivationService = fateActivationService;
+        this.followUpTracker = followUpTracker;
         this.combatPlugins = combatPlugins;
         this.automatorChain = automatorChain;
+        this.rewardTracker = rewardTracker;
     }
 
     public void Draw()
@@ -110,6 +116,8 @@ public sealed class DebugRenderer
         ImGui.Text($"Travel: {automatorChain.TravelPhase} ({automatorChain.TravelPhaseDetail ?? "n/a"})");
         ImGui.Text($"Teleport: {teleportExecutor.State} | Navmesh: {navmeshClient.IsAvailable} ({navmeshClient.Status})");
         ImGui.Text($"Activation: {fateActivationService.Status}");
+        ImGui.TextWrapped($"Zone rotation: {automatorChain.ZoneRotationStatus}");
+        ImGui.Text($"Follow-up: {followUpTracker.Status}");
 
         if (diagnostics.Candidates.Count == 0)
         {
@@ -132,7 +140,7 @@ public sealed class DebugRenderer
             ImGui.Text($"State: {candidate.Fate.State} | Eligibility: {(candidate.Eligible ? "Eligible" : candidate.ExclusionReason ?? "Excluded")}");
             ImGui.Text($"Progress: {candidate.Fate.Progress}% | Hand-ins: {candidate.Fate.HandInCount} | Bonus: {candidate.Fate.HasBonus} | Max level: {candidate.Fate.MaxLevel}");
             ImGui.Text($"Motivation NPC: {FormatObjectId(candidate.Fate.MotivationNpc)} | Objective NPC: {FormatObjectId(candidate.Fate.ObjectiveNpc)}");
-            ImGui.Text($"Rule: {candidate.Fate.Rule} | Fate rule extension: {candidate.Fate.FateRuleEx} | Event item: {candidate.Fate.EventItem}");
+            ImGui.Text($"Rule: {candidate.Fate.FateRule} ({candidate.Fate.Rule}) | Chain: {candidate.Fate.FateChain} | Fate rule extension: {candidate.Fate.FateRuleEx} | Event item: {candidate.Fate.EventItem}");
             if (!string.IsNullOrWhiteSpace(candidate.Fate.Description))
             {
                 ImGui.TextWrapped($"Description: {candidate.Fate.Description}");
@@ -145,7 +153,7 @@ public sealed class DebugRenderer
 
             if (candidate.Score is { } score)
             {
-                ImGui.Text($"Score: {score.FinalScore:F1} = {score.BaseScore:F0} - {score.DistancePenalty:F1} + {score.TimeAdjustment:F0} - {score.ActivationPenalty:F0} - {score.LevelPenalty:F1} + {score.TravelAdjustment:F0} + {score.ContinuationBonus:F0}");
+                ImGui.Text($"Score: {score.FinalScore:F1} = {score.BaseScore:F0} + {score.PriorityAdjustment:F1} - {score.DistancePenalty:F1} + {score.TimeAdjustment:F0} - {score.ActivationPenalty:F0} - {score.LevelPenalty:F1} + {score.TravelAdjustment:F0} + {score.ContinuationBonus:F0}");
                 ImGui.Text($"Level difference: {score.LevelDifference}");
             }
 
@@ -297,6 +305,8 @@ public sealed class DebugRenderer
         report.AppendLine($"Motivation NPC: {FormatObjectId(fate.MotivationNpc)}");
         report.AppendLine($"Objective NPC: {FormatObjectId(fate.ObjectiveNpc)}");
         report.AppendLine($"Rule: {fate.Rule}");
+        report.AppendLine($"FATE rule: {fate.FateRule}");
+        report.AppendLine($"FATE chain: {fate.FateChain}");
         report.AppendLine($"FATE rule extension: {fate.FateRuleEx}");
         report.AppendLine($"Event item: {fate.EventItem}");
         report.AppendLine($"Required event item: {fate.RequiredEventItem}");
@@ -308,7 +318,7 @@ public sealed class DebugRenderer
         if (candidate.Score is { } score)
         {
             report.AppendLine($"Score: {score.FinalScore:F1}");
-            report.AppendLine($"Score breakdown: base={score.BaseScore:F1}, distancePenalty={score.DistancePenalty:F1}, timeAdjustment={score.TimeAdjustment:F1}, activationPenalty={score.ActivationPenalty:F1}, levelDifference={score.LevelDifference}, levelPenalty={score.LevelPenalty:F1}, travelAdjustment={score.TravelAdjustment:F1}, continuationBonus={score.ContinuationBonus:F1}");
+            report.AppendLine($"Score breakdown: base={score.BaseScore:F1}, priorityAdjustment={score.PriorityAdjustment:F1}, distancePenalty={score.DistancePenalty:F1}, timeAdjustment={score.TimeAdjustment:F1}, activationPenalty={score.ActivationPenalty:F1}, levelDifference={score.LevelDifference}, levelPenalty={score.LevelPenalty:F1}, travelAdjustment={score.TravelAdjustment:F1}, continuationBonus={score.ContinuationBonus:F1}");
         }
 
         report.AppendLine();
@@ -339,10 +349,14 @@ public sealed class DebugRenderer
 
         report.AppendLine();
         report.AppendLine($"Automator state: {automatorChain.State} ({automatorChain.StateReason ?? "none"})");
+        report.AppendLine($"Recovery phase: {automatorChain.RecoveryPhase}");
+        report.AppendLine($"Zone rotation: {automatorChain.ZoneRotationStatus}");
         report.AppendLine($"Travel phase: {automatorChain.TravelPhase} ({automatorChain.TravelPhaseDetail ?? "none"})");
         report.AppendLine($"Teleport executor: {teleportExecutor.State}");
         report.AppendLine($"Navmesh: available={navmeshClient.IsAvailable}, status={navmeshClient.Status}");
         report.AppendLine($"FATE activation: {fateActivationService.Status}");
+        report.AppendLine($"Follow-up: {followUpTracker.Status}");
+        report.AppendLine($"Rewards: completed={rewardTracker.CompletedCount}, target={rewardTracker.RunUntil?.ToString() ?? "none"}, remaining={rewardTracker.Remaining?.ToString() ?? "none"}");
         return report.ToString();
     }
 }

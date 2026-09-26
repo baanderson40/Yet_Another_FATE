@@ -24,15 +24,19 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
     private ICallGateSubscriber<bool>? readySubscriber;
     private ICallGateSubscriber<uint, Dictionary<string, List<string>>?>? comboOptionsSubscriber;
     private ICallGateSubscriber<string, string, Guid?>? registerLeaseSubscriber;
+    private ICallGateSubscriber<string, string, string?, Guid?>? registerLeaseCallbackSubscriber;
     private ICallGateSubscriber<Guid, object?>? releaseLeaseSubscriber;
-    private ICallGateSubscriber<Guid, bool, object?>? setAutoRotationSubscriber;
-    private ICallGateSubscriber<Guid, object?>? setJobReadySubscriber;
-    private ICallGateSubscriber<Guid, object, object, object?>? setConfigSubscriber;
+    private ICallGateSubscriber<Guid, WrathSetResult>? setJobReadySubscriber;
+    private ICallGateSubscriber<Guid, bool, WrathSetResult>? setAutoRotationResultSubscriber;
+    private ICallGateSubscriber<Guid, object, object, WrathSetResult>? setConfigSubscriber;
+    private ICallGateProvider<int, string, object?>? callbackProvider;
+    private bool callbackRegistered;
 
     private Guid? activeLease;
     private uint? configuredJobId;
     private bool autoEnabled;
     private bool configApplied;
+    private bool leaseReleased;
 
     public WrathComboBridge(
         IDalamudPluginInterface pluginInterface,
@@ -116,25 +120,36 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
             return;
         }
 
-        SetAutoRotationState(false);
-        try
+        var autoStopped = !autoEnabled || SetAutoRotationState(false);
+        if (!leaseReleased)
         {
-            releaseLeaseSubscriber?.InvokeAction(lease);
-        }
-        catch (Exception ex)
-        {
-            log.Debug(ex, "WrathComboBridge: release lease failed");
+            try
+            {
+                releaseLeaseSubscriber?.InvokeAction(lease);
+                leaseReleased = true;
+            }
+            catch (Exception ex)
+            {
+                log.Debug(ex, "WrathComboBridge: release lease failed; retaining ownership for retry");
+            }
         }
 
-        activeLease = null;
-        autoEnabled = false;
-        configuredJobId = null;
-        configApplied = false;
+        if (autoStopped && leaseReleased)
+        {
+            activeLease = null;
+            autoEnabled = false;
+            configuredJobId = null;
+            configApplied = false;
+            leaseReleased = false;
+        }
     }
 
     public void Dispose()
     {
         NotifyAutomationStopped();
+        if (callbackRegistered)
+            callbackProvider?.UnregisterAction();
+        callbackRegistered = false;
     }
 
     private bool ApplyFateConfiguration()
@@ -160,7 +175,10 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
     {
         try
         {
-            setConfigSubscriber?.InvokeFunc(lease, (int)option, value);
+            var result = setConfigSubscriber?.InvokeFunc(lease, (int)option, value) ?? WrathSetResult.InvalidConfiguration;
+            if (result == WrathSetResult.InvalidLease) HandleInvalidLease();
+            if (!IsSuccess(result))
+                return false;
             log.Debug("WrathComboBridge: set config {Option} => {Value}", option, value);
             return true;
         }
@@ -192,7 +210,13 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
 
         try
         {
-            setJobReadySubscriber?.InvokeFunc(lease);
+            var result = setJobReadySubscriber?.InvokeFunc(lease) ?? WrathSetResult.InvalidLease;
+            if (result == WrathSetResult.InvalidLease) HandleInvalidLease();
+            if (!IsSuccess(result))
+            {
+                log.Debug("WrathComboBridge: job-ready request rejected with result {Result}", result);
+                return false;
+            }
             log.Debug("WrathComboBridge: requested auto-rotation setup for job {JobId}", jobId);
             configuredJobId = jobId;
             configApplied = false;
@@ -214,7 +238,13 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
 
         try
         {
-            setAutoRotationSubscriber?.InvokeFunc(lease, enabled);
+            var result = setAutoRotationResultSubscriber?.InvokeFunc(lease, enabled) ?? WrathSetResult.InvalidLease;
+            if (result == WrathSetResult.InvalidLease) HandleInvalidLease();
+            if (!IsSuccess(result))
+            {
+                log.Debug("WrathComboBridge: auto-rotation request rejected with result {Result}", result);
+                return false;
+            }
             autoEnabled = enabled;
             log.Debug("WrathComboBridge: auto rotation => {State}", enabled);
             return true;
@@ -235,10 +265,13 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
 
         try
         {
-            var lease = registerLeaseSubscriber?.InvokeFunc("YetAnotherFATE", "YetAnotherFATE");
+            var lease = registerLeaseCallbackSubscriber?.HasFunction == true
+                ? registerLeaseCallbackSubscriber.InvokeFunc("YetAnotherFATE", "YetAnotherFATE", "YetAnotherFATE")
+                : registerLeaseSubscriber?.InvokeFunc("YetAnotherFATE", "YetAnotherFATE");
             if (lease is { } guid)
             {
                 activeLease = guid;
+                leaseReleased = false;
                 log.Debug("WrathComboBridge: obtained lease {Lease}", guid);
                 return true;
             }
@@ -319,6 +352,20 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
 
         try
         {
+            registerLeaseCallbackSubscriber ??= pluginInterface.GetIpcSubscriber<string, string, string?, Guid?>("WrathCombo.RegisterForLeaseWithCallback");
+            callbackProvider ??= pluginInterface.GetIpcProvider<int, string, object?>("YetAnotherFATE.WrathComboCallback");
+            if (!callbackRegistered)
+            {
+                callbackProvider.RegisterAction(OnLeaseCancelled);
+                callbackRegistered = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "WrathComboBridge: callback lease IPC unavailable; using non-callback lease");
+        }
+        try
+        {
             releaseLeaseSubscriber ??= pluginInterface.GetIpcSubscriber<Guid, object?>(ReleaseLeaseEndpoint);
         }
         catch (Exception ex)
@@ -328,7 +375,7 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
 
         try
         {
-            setAutoRotationSubscriber ??= pluginInterface.GetIpcSubscriber<Guid, bool, object?>(SetAutoRotationEndpoint);
+            setAutoRotationResultSubscriber ??= pluginInterface.GetIpcSubscriber<Guid, bool, WrathSetResult>(SetAutoRotationEndpoint);
         }
         catch (Exception ex)
         {
@@ -337,7 +384,7 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
 
         try
         {
-            setJobReadySubscriber ??= pluginInterface.GetIpcSubscriber<Guid, object?>(SetJobReadyEndpoint);
+            setJobReadySubscriber ??= pluginInterface.GetIpcSubscriber<Guid, WrathSetResult>(SetJobReadyEndpoint);
         }
         catch (Exception ex)
         {
@@ -346,7 +393,7 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
 
         try
         {
-            setConfigSubscriber ??= pluginInterface.GetIpcSubscriber<Guid, object, object, object?>(SetConfigEndpoint);
+            setConfigSubscriber ??= pluginInterface.GetIpcSubscriber<Guid, object, object, WrathSetResult>(SetConfigEndpoint);
         }
         catch (Exception ex)
         {
@@ -354,8 +401,44 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
         }
 
         return registerLeaseSubscriber != null && releaseLeaseSubscriber != null &&
-               setAutoRotationSubscriber != null && setJobReadySubscriber != null &&
+               setAutoRotationResultSubscriber != null && setJobReadySubscriber != null &&
                setConfigSubscriber != null;
+    }
+
+    private void OnLeaseCancelled(int _, string reason)
+    {
+        if (activeLease == null)
+            return;
+        log.Warning("WrathComboBridge: lease cancelled by provider ({Reason}); reacquiring on next automation tick", reason);
+        activeLease = null;
+        leaseReleased = false;
+        autoEnabled = false;
+        configuredJobId = null;
+        configApplied = false;
+    }
+
+    private void HandleInvalidLease()
+    {
+        activeLease = null;
+        leaseReleased = false;
+        autoEnabled = false;
+        configuredJobId = null;
+        configApplied = false;
+    }
+
+    private static bool IsSuccess(WrathSetResult result) => result is WrathSetResult.Okay or WrathSetResult.OkayWorking;
+
+    private enum WrathSetResult
+    {
+        Okay = 0,
+        OkayWorking = 1,
+        IPCDisabled = 10,
+        InvalidLease = 11,
+        BlacklistedLease = 12,
+        Duplicate = 13,
+        PlayerNotAvailable = 14,
+        InvalidConfiguration = 15,
+        InvalidValue = 16,
     }
 
     private enum WrathAutoConfigOption

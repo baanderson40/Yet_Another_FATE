@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Linq;
 using System.Numerics;
+using System.Reflection;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using YetAnotherFATE.Renderers;
@@ -13,7 +15,7 @@ public class MainWindow : Window, IDisposable
     private readonly DebugWindow debugWindow;
 
     public MainWindow(MainRenderer renderer, ConfigWindow configWindow, DebugWindow debugWindow)
-        : base("Yet Another FATE##main", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
+        : base(GetWindowTitle(), ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         this.renderer = renderer;
         this.configWindow = configWindow;
@@ -27,6 +29,14 @@ public class MainWindow : Window, IDisposable
     }
 
     public void Dispose() { }
+
+    private static string GetWindowTitle()
+    {
+        var devBuild = typeof(MainWindow).Assembly
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(attribute => attribute.Key == "YetAnotherFATE.DevBuild")?.Value ?? "unknown";
+        return $"Yet Another FATE [DEV {devBuild}]##main";
+    }
 
     public override void Draw()
     {

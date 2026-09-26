@@ -4,7 +4,6 @@ using System.Linq;
 using System.Numerics;
 using Dalamud.Plugin.Services;
 using Dalamud.Game.ClientState.Objects.Types;
-using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using YetAnotherFATE.Data.Fates;
 
 namespace YetAnotherFATE.Services.Fates.CombatHelper.Targeter;
@@ -16,6 +15,7 @@ public sealed class FateTargetTracker : IFateTargetTracker
     private readonly IPluginLog log;
     private FateTargetSnapshot? currentTarget;
     private DateTimeOffset nextLogAt = DateTimeOffset.MinValue;
+    private DateTimeOffset nextExclusionLogAt = DateTimeOffset.MinValue;
 
     public FateTargetTracker(
         IObjectTable objectTable,
@@ -56,24 +56,19 @@ public sealed class FateTargetTracker : IFateTargetTracker
                 continue;
             }
 
-            if (!npc.IsValid() || npc.GameObjectId == 0 || npc.CurrentHp == 0 || npc.IsDead || !npc.IsTargetable)
+            var exclusionReason = FateTargetPolicy.GetExclusionReason(npc, selection.Fate);
+            if (exclusionReason != null)
             {
-                continue;
-            }
-
-            if (string.Equals(npc.BattleNpcKind.ToString(), "Pet", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if (!IsHostileFateTarget(npc, selection.Fate.FateId))
-            {
+                if (currentTarget is { } previous && previous.ObjectId == npc.GameObjectId)
+                    EmitExclusion(previous, npc, selection.Fate, exclusionReason);
                 continue;
             }
 
             var position = npc.Position;
             var distanceFromPlayer = Vector3.Distance(player.Position, position);
-            var distanceFromFateCenter = Vector3.Distance(selection.Fate.Center, position);
+            var dx = selection.Fate.Center.X - position.X;
+            var dz = selection.Fate.Center.Z - position.Z;
+            var distanceFromFateCenter = MathF.Sqrt(dx * dx + dz * dz);
             var allowedRadius = selection.Fate.Radius + 20f;
             if (distanceFromFateCenter > allowedRadius)
             {
@@ -179,14 +174,19 @@ public sealed class FateTargetTracker : IFateTargetTracker
         return string.IsNullOrWhiteSpace(name) ? "Unknown Target" : name;
     }
 
-    private static unsafe bool IsHostileFateTarget(IBattleNpc npc, uint fateId)
+    private void EmitExclusion(FateTargetSnapshot previous, IBattleNpc npc, ActiveFate fate, string reason)
     {
-        if (fateId > ushort.MaxValue || npc.Address == nint.Zero)
-        {
-            return false;
-        }
+        if (DateTimeOffset.UtcNow < nextExclusionLogAt)
+            return;
 
-        var character = (Character*)npc.Address;
-        return character->VirtualTable != null && character->FateId == fateId && character->IsHostile;
+        log.Debug("FateTargetTracker: rejected current target #{ObjectId} {Name} for fate #{FateId}; reason={Reason} baseId={BaseId} kind={Kind} nameplate={Nameplate}",
+            previous.ObjectId,
+            previous.Name,
+            fate.FateId,
+            reason,
+            npc.BaseId,
+            npc.BattleNpcKind,
+            FateTargetPolicy.GetNameplateIcon(npc));
+        nextExclusionLogAt = DateTimeOffset.UtcNow.AddSeconds(5);
     }
 }

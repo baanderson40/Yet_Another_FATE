@@ -1,0 +1,21 @@
+<Project>
+  <PropertyGroup><BaseIntermediateOutputPath>integration-obj/</BaseIntermediateOutputPath></PropertyGroup>
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems><UseAppHost>false</UseAppHost>
+    <OutputPath>integration-bin/</OutputPath>
+    <DalamudHome Condition="'$(DalamudHome)' == ''">$(APPDATA)/XIVLauncher/addon/Hooks/dev</DalamudHome>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="IntegrationTests.cs" />
+    <Compile Include="RotationTests.cs" />
+    <ProjectReference Include="../YetAnotherFATE/YetAnotherFATE.csproj" />
+    <Reference Include="Dalamud"><HintPath>$(DalamudHome)/Dalamud.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="FFXIVClientStructs"><HintPath>$(DalamudHome)/FFXIVClientStructs.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="Lumina"><HintPath>$(DalamudHome)/Lumina.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="Lumina.Excel"><HintPath>$(DalamudHome)/Lumina.Excel.dll</HintPath><Private>true</Private></Reference>
+  </ItemGroup>
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+</Project>

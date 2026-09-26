@@ -1,3 +1,4 @@
+using System;
 using YetAnotherFATE.Data.Travel;
 
 namespace YetAnotherFATE.Services.Travel;
@@ -24,6 +25,8 @@ public enum TeleportState
 public interface ITeleportExecutor
 {
     TeleportState State { get; }
+    DateTimeOffset? LastCompletedAt { get; }
+    DateTimeOffset? LastFailedAt { get; }
 
     TeleportRequestResult RequestTeleport(in TeleportRecommendation recommendation);
 }
