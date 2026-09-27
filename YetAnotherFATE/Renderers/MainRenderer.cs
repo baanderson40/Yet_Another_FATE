@@ -6,8 +6,6 @@ using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Plugin.Services;
-using Lumina.Excel.Sheets;
-using YetAnotherFATE.Chains;
 using YetAnotherFATE.Config;
 using YetAnotherFATE.Data.Fates;
 using YetAnotherFATE.Data.Travel;
@@ -19,206 +17,69 @@ namespace YetAnotherFATE.Renderers;
 public sealed class MainRenderer
 {
     private readonly Configuration configuration;
-    private readonly IPlayerState playerState;
-    private readonly IClientState clientState;
-    private readonly IDataManager dataManager;
     private readonly IFateRepository fateRepository;
     private readonly IFateSelector fateSelector;
     private readonly IPluginLog log;
-    private readonly AutomatorChain automatorChain;
     private readonly ITravelController travelController;
     private readonly IFateRewardTracker rewardTracker;
     private readonly IFateFollowUpTracker followUpTracker;
 
     public MainRenderer(
         Configuration configuration,
-        IPlayerState playerState,
-        IClientState clientState,
-        IDataManager dataManager,
         IFateRepository fateRepository,
         IFateSelector fateSelector,
         IPluginLog log,
-        AutomatorChain automatorChain,
         ITravelController travelController,
         IFateRewardTracker rewardTracker,
         IFateFollowUpTracker followUpTracker)
     {
         this.configuration = configuration;
-        this.playerState = playerState;
-        this.clientState = clientState;
-        this.dataManager = dataManager;
         this.fateRepository = fateRepository;
         this.fateSelector = fateSelector;
         this.log = log;
-        this.automatorChain = automatorChain;
         this.travelController = travelController;
         this.rewardTracker = rewardTracker;
         this.followUpTracker = followUpTracker;
     }
 
-    public void Draw(System.Action openConfigAction, System.Action openDebugAction)
+    public void Draw()
     {
-        if (ImGui.Button("Show Settings"))
+        if (!configuration.AutomatorEnabled)
         {
-            openConfigAction();
-        }
-
-        ImGui.SameLine();
-        if (ImGui.Button("Debug"))
-        {
-            openDebugAction();
-        }
-
-        ImGui.SameLine();
-        var automatorEnabled = configuration.AutomatorEnabled;
-        if (ImGui.Checkbox("Enable Automator", ref automatorEnabled))
-        {
-            configuration.AutomatorEnabled = automatorEnabled;
-            configuration.Save();
-        }
-
-        if (automatorEnabled && !rewardTracker.PendingStop)
-        {
-            ImGui.SameLine();
-            if (ImGui.Button("Stop when safe")) rewardTracker.RequestStopWhenSafe();
-        }
-
-        ImGui.Text($"Automator: {automatorChain.State}");
-        if (!string.IsNullOrWhiteSpace(automatorChain.StateReason))
-        {
-            ImGui.SameLine();
-            ImGui.TextDisabled(automatorChain.StateReason);
-        }
-
-        if (automatorChain.CurrentSelection is { } selection)
-        {
-            ImGui.SameLine();
-            ImGui.TextDisabled($"FATE #{selection.Fate.FateId} {selection.Fate.Name}");
-        }
-
-        if (automatorChain.TravelPhase != TravelPhase.Idle)
-        {
-            ImGui.TextDisabled($"Travel: {automatorChain.TravelPhase} {automatorChain.TravelPhaseDetail}");
-        }
-
-        if (configuration.ZoneRotationEnabled)
-            ImGui.TextWrapped($"Zone rotation: {automatorChain.ZoneRotationStatus}");
-        ImGui.Text($"Rewards completed: {rewardTracker.CompletedCount}");
-        if (rewardTracker.Remaining is { } remaining)
-        {
-            ImGui.SameLine();
-            ImGui.Text($"Remaining: {remaining}");
-        }
-
-        if (rewardTracker.PendingStop)
-        {
-            ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "Stop pending: waiting until safe");
-        }
-
-        if (configuration.AutoRetainerHandoffEnabled || automatorChain.AutoRetainerHandoffPhase != Data.Retainers.AutoRetainerHandoffPhase.Idle)
-        {
-            var readiness = automatorChain.AutoRetainerReadiness;
-            ImGui.TextWrapped($"AutoRetainer: {automatorChain.AutoRetainerHandoffStatus}");
-            if (readiness.RegisteredCharacterCount > 0)
-                ImGui.TextDisabled($"Ready characters: {readiness.ReadyCharacterCount}/{readiness.RegisteredCharacterCount} | Mode: {configuration.AutoRetainerMode}");
-            ImGui.SameLine();
-            if (automatorChain.AutoRetainerHandoffPhase == Data.Retainers.AutoRetainerHandoffPhase.Failed)
-            {
-                if (ImGui.SmallButton("Retry"))
-                    automatorChain.RetryAutoRetainerHandoff();
-                ImGui.SameLine();
-                if (ImGui.SmallButton("Resume"))
-                    automatorChain.ResumeAutoRetainerHandoff();
-                ImGui.SameLine();
-                if (ImGui.SmallButton("Abandon"))
-                    automatorChain.AbandonAutoRetainerHandoff();
-            }
-            else if (ImGui.SmallButton("Run pass now"))
-                automatorChain.RequestAutoRetainerPass();
-        }
-
-        if (followUpTracker.IsWatching)
-        {
-            ImGui.TextDisabled(followUpTracker.Status);
-        }
-
-        ImGui.Spacing();
-
-        using var child = ImRaii.Child("YetAnotherFATE.Body", Vector2.Zero, true);
-        if (!child.Success)
-        {
-            return;
-        }
-
-        ImGui.Text("Active FATEs");
-        ImGuiHelpers.ScaledDummy(20.0f);
-
-        if (!playerState.IsLoaded)
-        {
-            ImGui.Text("Local player is not logged in.");
-            return;
-        }
-
-        if (!playerState.ClassJob.IsValid)
-        {
-            ImGui.Text("Current job information unavailable.");
-            return;
-        }
-
-        ImGui.AlignTextToFramePadding();
-        ImGui.Text("Current job:");
-        ImGui.SameLine(120 * ImGuiHelpers.GlobalScale);
-
-        ImGui.Text(playerState.ClassJob.Value.Abbreviation.ToString());
-        ImGui.SameLine();
-        ImGui.Text($" [Level {playerState.Level}]");
-
-        var territoryId = clientState.TerritoryType;
-        if (dataManager.GetExcelSheet<TerritoryType>().TryGetRow(territoryId, out var territoryRow))
-        {
-            ImGui.Text("Current location:");
-            ImGui.SameLine(120 * ImGuiHelpers.GlobalScale);
-            ImGui.Text(territoryRow.PlaceName.Value.Name.ToString());
+            if (ImGui.Button("Start")) rewardTracker.Start();
         }
         else
         {
-            ImGui.Text("Current location unknown.");
+            var stoppingSafely = rewardTracker.PendingStop;
+            if (ImGui.Button(stoppingSafely ? "Stopping safely..." : "Stop"))
+            {
+                if (stoppingSafely || !ImGui.GetIO().KeyCtrl)
+                    rewardTracker.Stop();
+                else
+                    rewardTracker.RequestStopWhenSafe();
+            }
+
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(stoppingSafely ? "Click to stop immediately" : "Ctrl+click to stop when safe");
         }
 
-        ImGuiHelpers.ScaledDummy(10f);
+        ImGui.Spacing();
         DrawFateList();
     }
 
     private void DrawFateList()
     {
         var fates = fateRepository.EnumerateActiveFates();
-
-        if (fates.Count == 0)
-        {
-            ImGui.Text("No active FATEs detected.");
-            return;
-        }
-
         var diagnostics = fateSelector.Evaluate(fates);
-        var selection = diagnostics.Selected;
-        var selectedId = selection?.Fate.FateId;
-
-        if (selection != null)
-        {
-            ImGui.TextColored(new Vector4(0.6f, 0.9f, 0.4f, 1f), $"Tracking: {selection.Value.Fate.Name} (#{selection.Value.Fate.FateId})");
-            ImGui.Text($"Diagnostic score: {selection.Value.Score:F1} (selection uses priority order)");
-            ImGui.TextWrapped($"Reason: {selection.Value.Reason}");
-        }
-        else
-        {
-            ImGui.Text("Tracking: none");
-        }
+        var selectedId = diagnostics.Selected?.Fate.FateId;
 
         if (ImGui.BeginTable("##yafate_table", 8,
-                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchSame | ImGuiTableFlags.ScrollX,
-                Vector2.Zero, Math.Max(ImGui.GetContentRegionAvail().X, 1000f * ImGuiHelpers.GlobalScale)))
+                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchSame
+                | ImGuiTableFlags.ScrollX | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Reorderable
+                | ImGuiTableFlags.Hideable | ImGuiTableFlags.Resizable,
+                new Vector2(-1f, Math.Max(0f, ImGui.GetContentRegionAvail().Y))))
         {
-            ImGui.TableSetupColumn("FATE");
+            ImGui.TableSetupColumn("FATE", ImGuiTableColumnFlags.NoHide);
             ImGui.TableSetupColumn("Lv", ImGuiTableColumnFlags.WidthFixed);
             ImGui.TableSetupColumn("Distance (y)", ImGuiTableColumnFlags.WidthFixed);
             ImGui.TableSetupColumn("Time Left", ImGuiTableColumnFlags.WidthFixed);
@@ -226,7 +87,17 @@ public sealed class MainRenderer
             ImGui.TableSetupColumn("Score", ImGuiTableColumnFlags.WidthFixed);
             ImGui.TableSetupColumn("Eligibility");
             ImGui.TableSetupColumn("Progress", ImGuiTableColumnFlags.WidthFixed, 120f * ImGuiHelpers.GlobalScale);
+            ImGui.TableSetupScrollFreeze(0, 1);
             ImGui.TableHeadersRow();
+
+            if (fates.Count == 0)
+            {
+                ImGui.TableNextRow();
+                ImGui.TableSetColumnIndex(0);
+                ImGui.TextUnformatted("No active FATEs");
+                ImGui.EndTable();
+                return;
+            }
 
             foreach (var candidate in diagnostics.Candidates)
             {

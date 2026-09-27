@@ -58,6 +58,15 @@ public sealed class FateRewardTracker : IFateRewardTracker, IDisposable
         configuration.Save();
     }
 
+    public void Start()
+    {
+        configuration.AutomatorEnabled = true;
+        SynchronizeSession();
+        RunUntil = null;
+        PendingStop = false;
+        configuration.Save();
+    }
+
     public void Stop()
     {
         configuration.AutomatorEnabled = false;

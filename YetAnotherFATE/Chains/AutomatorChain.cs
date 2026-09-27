@@ -165,6 +165,7 @@ public sealed class AutomatorChain : IDisposable
     {
         if (!configuration.AutomatorEnabled)
             return;
+        territory = clientState.TerritoryType;
         context.Reset(log);
         context.TransitionTo(AutomatorState.SelectingFate, "AutoRetainer handoff complete", log);
     }

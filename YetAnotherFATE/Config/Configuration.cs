@@ -2,6 +2,7 @@ using Dalamud.Configuration;
 using Dalamud.Plugin;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using YetAnotherFATE.Data.Combat;
 using YetAnotherFATE.Data.Fates;
@@ -22,15 +23,8 @@ public class Configuration : IPluginConfiguration
     public Vector4 BarColour { get; set; } = DefaultBarColour;
     public List<uint> FateBlacklist { get; set; } = new();
     public List<FateRule> BlacklistedFateRules { get; set; } = new();
-    public List<FateSortOrder> FateSortOrder { get; set; } =
-    [
-        new() { Criteria = FateSortCriteria.HasBonusWithTwist, Descending = true },
-        new() { Criteria = FateSortCriteria.Progress, Descending = true },
-        new() { Criteria = FateSortCriteria.HasBonus, Descending = true },
-        new() { Criteria = FateSortCriteria.TimeRemainingUrgent, Descending = true },
-        new() { Criteria = FateSortCriteria.TimeRemaining, Descending = false },
-        new() { Criteria = FateSortCriteria.Distance, Descending = false },
-    ];
+    [Newtonsoft.Json.JsonProperty(ObjectCreationHandling = Newtonsoft.Json.ObjectCreationHandling.Replace)]
+    public List<FateSortOrder> FateSortOrder { get; set; } = CreateDefaultFateSortOrder();
     public int FateMaxDurationSeconds { get; set; } = 900;
     public int FateMinTimeRemainingSeconds { get; set; } = 120;
     public int FateMaxProgress { get; set; } = 90;
@@ -90,7 +84,41 @@ public class Configuration : IPluginConfiguration
             Version = 2;
             Save();
         }
+        var normalizedSortOrder = NormalizeFateSortOrder(FateSortOrder);
+        var sortOrderChanged = !AreSortOrdersEqual(FateSortOrder, normalizedSortOrder);
+        FateSortOrder = normalizedSortOrder;
+        if (Version < 3 || sortOrderChanged)
+        {
+            Version = Math.Max(Version, 3);
+            Save();
+        }
     }
+
+    public static List<FateSortOrder> CreateDefaultFateSortOrder() =>
+    [
+        new() { Criteria = FateSortCriteria.HasBonusWithTwist, Descending = true },
+        new() { Criteria = FateSortCriteria.Progress, Descending = true },
+        new() { Criteria = FateSortCriteria.HasBonus, Descending = true },
+        new() { Criteria = FateSortCriteria.TimeRemainingUrgent, Descending = true },
+        new() { Criteria = FateSortCriteria.TimeRemaining, Descending = false },
+        new() { Criteria = FateSortCriteria.Distance, Descending = false },
+    ];
+
+    private static List<FateSortOrder> NormalizeFateSortOrder(List<FateSortOrder>? sortOrder)
+    {
+        if (sortOrder == null)
+            return CreateDefaultFateSortOrder();
+
+        var seen = new HashSet<FateSortCriteria>();
+        return sortOrder
+            .Where(item => Enum.IsDefined(item.Criteria) && seen.Add(item.Criteria))
+            .Select(item => new FateSortOrder { Criteria = item.Criteria, Descending = item.Descending })
+            .ToList();
+    }
+
+    private static bool AreSortOrdersEqual(IReadOnlyList<FateSortOrder>? left, IReadOnlyList<FateSortOrder> right)
+        => left != null && left.Count == right.Count && left.Zip(right).All(pair =>
+            pair.First.Criteria == pair.Second.Criteria && pair.First.Descending == pair.Second.Descending);
 
     public void Save()
     {

@@ -98,6 +98,9 @@ class Program
         rewards.CompleteSafeStop(); Check(!config.AutomatorEnabled && rewards.RunUntil == null, "safe stop ends session");
         Close(); rewards.Start(1); Check(rewards.CompletedCount == 0, "new session resets count");
         Reward(); Check(rewards.PendingStop, "new reward hits target");
+        rewards.Stop();
+        rewards.Start();
+        Check(config.AutomatorEnabled && rewards.RunUntil == null && !rewards.PendingStop, "unlimited UI start resets run target");
 
         Check(new Configuration().FateMinTimeRemainingSeconds == 120, "reference minimum time default");
         var sceneMatcher = typeof(ActivatingFateStateHandler).GetMethod("MatchesInteractionScene", BindingFlags.Static | BindingFlags.NonPublic)!;
@@ -124,7 +127,7 @@ class Program
         Check(FateTargetPolicy.GetForlornPriority(1) == 0, "ordinary NameId has no Forlorn priority");
         var pi = DispatchProxy.Create<IDalamudPluginInterface, Noop>();
         var migrated = new Configuration { FateMinTimeRemainingSeconds = 240 };
-        migrated.Initialize(pi); Check(migrated.Version == 2 && migrated.FateMinTimeRemainingSeconds == 120, "old erroneous default migrated");
+        migrated.Initialize(pi); Check(migrated.Version == 3 && migrated.FateMinTimeRemainingSeconds == 120, "old erroneous default migrated");
         var custom = new Configuration { FateMinTimeRemainingSeconds = 75 };
         custom.Initialize(pi); Check(custom.FateMinTimeRemainingSeconds == 75, "custom minimum retained");
         var explicit240 = new Configuration { Version = 1, FateMinTimeRemainingSeconds = 240 };
@@ -140,6 +143,22 @@ class Program
         Check((bool)memberReader.MakeGenericMethod(typeof(bool)).Invoke(null, [fixture.GetType(), fixture, "MultiWaitForAll", false])!,
             "AutoRetainer wait-for-all field is read");
         Check((int)FateSortCriteria.HasBonus == 1 && (int)FateSortCriteria.Progress == 2 && (int)FateSortCriteria.Distance == 5 && (int)FateSortCriteria.TimeRemaining == 4, "persisted criterion values stable");
+        var duplicatedPriorities = new Configuration
+        {
+            Version = 2,
+            FateSortOrder =
+            [
+                new() { Criteria = FateSortCriteria.Distance, Descending = true },
+                new() { Criteria = FateSortCriteria.Distance, Descending = false },
+                new() { Criteria = FateSortCriteria.Level, Descending = true },
+            ]
+        };
+        duplicatedPriorities.Initialize(pi);
+        Check(duplicatedPriorities.Version == 3 && duplicatedPriorities.FateSortOrder.Count == 2
+            && duplicatedPriorities.FateSortOrder[0].Criteria == FateSortCriteria.Distance
+            && duplicatedPriorities.FateSortOrder[0].Descending
+            && duplicatedPriorities.FateSortOrder[1].Criteria == FateSortCriteria.Level,
+            "duplicate FATE priorities normalize while preserving first occurrence");
         var follow = new FateFollowUpTracker(config);
         var fate = default(ActiveFate) with { FateId = 10, TerritoryId = 100, HasSheetMetadata = true, HasFollowUp = true, LocationId = 9, Progress = 100 };
         follow.Begin(fate);
@@ -215,6 +234,7 @@ class Program
         participant.Reset();
         Check((DateTimeOffset)typeof(ParticipatingInFateStateHandler).GetField("collectionEndedAt", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(participant)! == default, "participant reset removes stale grace");
         TestDeathReturn(log, pi);
+        TestTerritoryReturn();
         TestCityDeathReturn(log);
         RotationTests.Run();
         Console.WriteLine($"PASS: {checks} integration assertions against compiled production assembly");
@@ -543,6 +563,39 @@ class Program
             }
             if (exit != "complete") Check(aborts == 1 && state == CityAethernetState.Idle, $"{exit}: real chain/handler cancels owned optional provider work");
         }
+    }
+
+    static void TestTerritoryReturn()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var destination = new Vector3(500, 0, 500);
+        var near = new AetheryteSummary(7, 100, "Near", 0, new(501, 0, 501), "test", true, false, 2, 99999, false);
+        var zone = new ZoneInfo(100, "Origin zone", 0, true, true, near, [near], [near], true, false, default, now);
+        var zones = Stub<IZoneService>((m, a) => zone);
+        var issued = 0;
+        var executor = Stub<ITeleportExecutor>((m, a) =>
+        {
+            if (m.Name == "get_State") return TeleportState.Idle;
+            if (m.Name == "RequestTeleport") { issued++; return TeleportRequestResult.Issued; }
+            return Noop.Default(m);
+        });
+        var route = new TerritoryReturnRoute(zones, executor);
+
+        route.Tick(100, destination, 200, false, now);
+        route.Tick(100, destination, 200, true, now.AddSeconds(1));
+        route.Tick(100, destination, 200, true, now.AddSeconds(2));
+        Check(issued == 1, "same-character handoff requests return to saved origin territory");
+
+        route.Reset();
+        issued = 0;
+        route.Tick(100, destination, 100, true, now);
+        Check(route.Tick(100, destination, 100, true, now.AddSeconds(1)) == TerritoryReturnResult.Arrived && issued == 0,
+            "character return already in origin territory skips extra teleport");
+
+        var missingRoute = new TerritoryReturnRoute(Stub<IZoneService>((m, a) => null), executor);
+        missingRoute.Tick(100, destination, 200, true, now);
+        Check(missingRoute.Tick(100, destination, 200, true, now.AddSeconds(1)) == TerritoryReturnResult.Failed,
+            "missing origin route fails without resuming in wrong territory");
     }
 
     static T Stub<T>(Func<MethodInfo, object?[]?, object?>? handler = null) where T : class

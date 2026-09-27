@@ -7,6 +7,7 @@ public interface IFateRewardTracker
     int? Remaining { get; }
     bool PendingStop { get; }
     void SynchronizeSession();
+    void Start();
     void Start(int count);
     void Stop();
     void RequestStopWhenSafe();

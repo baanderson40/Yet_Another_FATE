@@ -3,6 +3,7 @@ using System.Linq;
 using System.Numerics;
 using System.Reflection;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using YetAnotherFATE.Renderers;
 
@@ -21,9 +22,28 @@ public class MainWindow : Window, IDisposable
         this.configWindow = configWindow;
         this.debugWindow = debugWindow;
 
+        TitleBarButtons.Add(new TitleBarButton
+        {
+            Icon = FontAwesomeIcon.Cog,
+            IconOffset = new Vector2(1, 1),
+            Priority = int.MinValue,
+            ShowTooltip = () => ImGui.SetTooltip("Settings"),
+            Click = _ => configWindow.Toggle(),
+        });
+        TitleBarButtons.Add(new TitleBarButton
+        {
+            Icon = FontAwesomeIcon.Bug,
+            IconOffset = new Vector2(1, 1),
+            Priority = int.MinValue + 1,
+            ShowTooltip = () => ImGui.SetTooltip("Debug"),
+            Click = _ => debugWindow.Toggle(),
+        });
+
+        Size = new Vector2(300, 175);
+        SizeCondition = ImGuiCond.FirstUseEver;
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(375, 330),
+            MinimumSize = new Vector2(300, 175),
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue)
         };
     }
@@ -40,6 +60,6 @@ public class MainWindow : Window, IDisposable
 
     public override void Draw()
     {
-        renderer.Draw(configWindow.Toggle, debugWindow.Toggle);
+        renderer.Draw();
     }
 }

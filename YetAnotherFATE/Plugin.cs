@@ -123,6 +123,7 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton<AutomatorChain>();
         services.AddSingleton<IAutoRetainerClient, AutoRetainerClient>();
         services.AddSingleton<ILifestreamCharacterClient, LifestreamCharacterClient>();
+        services.AddSingleton<TerritoryReturnRoute>();
         services.AddSingleton<AutoRetainerHandoffController>();
         services.AddSingleton<IAutomatorStateHandler, TravellingToFateStateHandler>();
         services.AddSingleton<IAutomatorStateHandler, ActivatingFateStateHandler>();

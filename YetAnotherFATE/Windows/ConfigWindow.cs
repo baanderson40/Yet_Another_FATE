@@ -44,14 +44,6 @@ public class ConfigWindow : Window, IDisposable
 
     public override void Draw()
     {
-        var diagnostics = configuration.DiagnosticLoggingEnabled;
-        if (ImGui.Checkbox("Enable detailed diagnostic logging", ref diagnostics))
-        {
-            configuration.DiagnosticLoggingEnabled = diagnostics;
-            configuration.Save();
-        }
-
-        ImGui.Separator();
         DrawDisplaySection();
         ImGui.Separator();
         EnsureProvidersDetected();
@@ -325,12 +317,14 @@ public class ConfigWindow : Window, IDisposable
         ImGui.SameLine();
         if (ImGui.SmallButton("Reset priorities"))
         {
-            configuration.FateSortOrder = new Configuration().FateSortOrder;
+            configuration.FateSortOrder = Configuration.CreateDefaultFateSortOrder();
             configuration.Save();
         }
         ImGui.TextDisabled("Top criterion wins; lower rows break ties.");
+        var usedCriteria = configuration.FateSortOrder.Select(item => item.Criteria).ToHashSet();
         var moveFrom = -1;
         var moveTo = -1;
+        var removeAt = -1;
         for (var index = 0; index < configuration.FateSortOrder.Count; index++)
         {
             var item = configuration.FateSortOrder[index];
@@ -340,8 +334,13 @@ public class ConfigWindow : Window, IDisposable
             {
                 foreach (var criteria in Enum.GetValues<FateSortCriteria>())
                 {
+                    if (criteria != item.Criteria && usedCriteria.Contains(criteria))
+                        continue;
+
                     if (ImGui.Selectable(criteria.ToString(), criteria == item.Criteria))
                     {
+                        usedCriteria.Remove(item.Criteria);
+                        usedCriteria.Add(criteria);
                         item.Criteria = criteria;
                         configuration.FateSortOrder[index] = item;
                         configuration.Save();
@@ -378,11 +377,18 @@ public class ConfigWindow : Window, IDisposable
             ImGui.SameLine();
             if (ImGui.SmallButton("Remove"))
             {
-                configuration.FateSortOrder.RemoveAt(index--);
-                configuration.Save();
+                removeAt = index;
             }
 
             ImGui.PopID();
+            if (removeAt >= 0)
+                break;
+        }
+
+        if (removeAt >= 0)
+        {
+            configuration.FateSortOrder.RemoveAt(removeAt);
+            configuration.Save();
         }
 
         if (moveFrom >= 0)
@@ -392,11 +398,16 @@ public class ConfigWindow : Window, IDisposable
             configuration.Save();
         }
 
-        if (ImGui.Button("Add priority criterion"))
+        var availableCriteria = Enum.GetValues<FateSortCriteria>()
+            .Where(criteria => !usedCriteria.Contains(criteria))
+            .ToArray();
+        ImGui.BeginDisabled(availableCriteria.Length == 0);
+        if (ImGui.Button("Add priority criterion") && availableCriteria.Length > 0)
         {
-            configuration.FateSortOrder.Add(new FateSortOrder { Criteria = FateSortCriteria.Distance, Descending = false });
+            configuration.FateSortOrder.Add(new FateSortOrder { Criteria = availableCriteria[0], Descending = false });
             configuration.Save();
         }
+        ImGui.EndDisabled();
     }
 
     private void DrawIntegerSetting(string label, int value, int min, int max, Action<int> assign)

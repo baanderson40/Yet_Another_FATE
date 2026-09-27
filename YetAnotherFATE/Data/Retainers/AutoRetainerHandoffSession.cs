@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 
 namespace YetAnotherFATE.Data.Retainers;
 
@@ -7,6 +8,8 @@ public sealed class AutoRetainerHandoffSession
 {
     public AutoRetainerHandoffPhase Phase { get; set; }
     public ulong OriginalContentId { get; set; }
+    public uint OriginalTerritoryId { get; set; }
+    public Vector3 OriginalPosition { get; set; }
     public string OriginalCharacterName { get; set; } = string.Empty;
     public string OriginalWorldName { get; set; } = string.Empty;
     public bool WasAutomatorEnabled { get; set; }

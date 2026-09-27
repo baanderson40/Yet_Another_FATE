@@ -22,11 +22,11 @@ public sealed class AutoRetainerHandoffController : IDisposable
     private readonly IObjectTable objectTable;
     private readonly ICondition condition;
     private readonly IPluginLog log;
+    private readonly TerritoryReturnRoute territoryReturnRoute;
     private DateTimeOffset nextReadinessScan = DateTimeOffset.MinValue;
     private DateTimeOffset nextReturnAttempt = DateTimeOffset.MinValue;
     private bool manualPassRequested;
     private bool completionEventReceived;
-    private bool autoRetainerObservedActive;
     private bool disposed;
     private AutoRetainerReadinessSnapshot lastReadiness;
 
@@ -38,7 +38,8 @@ public sealed class AutoRetainerHandoffController : IDisposable
         IPlayerState playerState,
         IObjectTable objectTable,
         ICondition condition,
-        IPluginLog log)
+        IPluginLog log,
+        TerritoryReturnRoute territoryReturnRoute)
     {
         this.configuration = configuration;
         this.autoRetainer = autoRetainer;
@@ -48,6 +49,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
         this.objectTable = objectTable;
         this.condition = condition;
         this.log = log;
+        this.territoryReturnRoute = territoryReturnRoute;
         autoRetainer.SinglePassFinished += OnSinglePassFinished;
 
         if (configuration.AutoRetainerHandoff is { Phase: not AutoRetainerHandoffPhase.Idle })
@@ -65,23 +67,34 @@ public sealed class AutoRetainerHandoffController : IDisposable
 
     public void RequestManualPass()
     {
-        manualPassRequested = true;
         if (configuration.AutoRetainerHandoff?.Phase == AutoRetainerHandoffPhase.Failed)
         {
-            configuration.AutoRetainerHandoff = null;
-            configuration.Save();
+            Status = "AutoRetainer handoff failed; use Retry, Resume, or Abandon";
+            return;
         }
+
+        manualPassRequested = true;
         Status = "Manual AutoRetainer pass pending safe boundary";
     }
 
     public bool RetryFailedSession()
     {
-        if (configuration.AutoRetainerHandoff?.Phase != AutoRetainerHandoffPhase.Failed)
+        var session = configuration.AutoRetainerHandoff;
+        if (session?.Phase != AutoRetainerHandoffPhase.Failed)
             return false;
-        configuration.AutoRetainerHandoff = null;
-        configuration.Save();
-        manualPassRequested = true;
-        Status = "AutoRetainer handoff retry pending safe boundary";
+        if (session.OriginalTerritoryId == 0)
+        {
+            Status = session.LastError ?? "AutoRetainer origin territory unavailable; manual recovery required";
+            return true;
+        }
+
+        session.LastError = null;
+        territoryReturnRoute.Reset();
+        if (clientState.IsLoggedIn && playerState.ContentId == session.OriginalContentId && IsPlayerSafe())
+            SetPhaseAfterOriginalCharacter(session);
+        else
+            SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalCharacter);
+        Status = "Retrying AutoRetainer handoff recovery";
         return true;
     }
 
@@ -101,11 +114,11 @@ public sealed class AutoRetainerHandoffController : IDisposable
         if (session?.Phase != AutoRetainerHandoffPhase.Failed)
             return false;
         session.LastError = null;
-        session.Phase = clientState.IsLoggedIn && playerState.ContentId == session.OriginalContentId
-            ? AutoRetainerHandoffPhase.Resuming
-            : AutoRetainerHandoffPhase.ReturningOriginalCharacter;
-        session.PhaseStartedAtUtc = DateTimeOffset.UtcNow;
-        configuration.Save();
+        territoryReturnRoute.Reset();
+        if (clientState.IsLoggedIn && playerState.ContentId == session.OriginalContentId && IsPlayerSafe())
+            SetPhaseAfterOriginalCharacter(session);
+        else
+            SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalCharacter);
         return true;
     }
 
@@ -146,6 +159,12 @@ public sealed class AutoRetainerHandoffController : IDisposable
     private bool TickSession(AutomatorChain chain)
     {
         var session = configuration.AutoRetainerHandoff!;
+        if (session.Phase != AutoRetainerHandoffPhase.Failed && session.OriginalTerritoryId == 0)
+        {
+            Fail(session, "AutoRetainer origin territory unavailable; manual recovery required");
+            return true;
+        }
+
         switch (session.Phase)
         {
             case AutoRetainerHandoffPhase.Starting:
@@ -156,6 +175,8 @@ public sealed class AutoRetainerHandoffController : IDisposable
                 return TickReturning(session);
             case AutoRetainerHandoffPhase.WaitingForOriginalCharacter:
                 return TickWaitingForOriginal(session);
+            case AutoRetainerHandoffPhase.ReturningOriginalTerritory:
+                return TickReturningTerritory(session);
             case AutoRetainerHandoffPhase.Resuming:
                 return TickResuming(chain, session);
             case AutoRetainerHandoffPhase.Failed:
@@ -199,7 +220,6 @@ public sealed class AutoRetainerHandoffController : IDisposable
         }
 
         completionEventReceived = false;
-        autoRetainerObservedActive = false;
         session.RequestIssued = true;
         configuration.Save();
         if (!autoRetainer.TryEnableSinglePass(session.Mode))
@@ -230,9 +250,21 @@ public sealed class AutoRetainerHandoffController : IDisposable
             return true;
         }
 
-        autoRetainerObservedActive |= busy || active;
-        session.ObservedAutoRetainerActive |= busy || active;
-        session.CompletionEventObserved |= completionEventReceived;
+        var sessionChanged = false;
+        if (busy || active)
+        {
+            sessionChanged |= !session.ObservedAutoRetainerActive;
+            session.ObservedAutoRetainerActive = true;
+        }
+
+        if (completionEventReceived)
+        {
+            sessionChanged |= !session.CompletionEventObserved;
+            session.CompletionEventObserved = true;
+        }
+
+        if (sessionChanged)
+            configuration.Save();
         if (busy || active)
         {
             Status = "AutoRetainer single pass active";
@@ -240,13 +272,13 @@ public sealed class AutoRetainerHandoffController : IDisposable
         }
 
         var elapsed = DateTimeOffset.UtcNow - session.PhaseStartedAtUtc;
-        if (!completionEventReceived && !autoRetainerObservedActive && elapsed < StartTimeout)
+        if (!session.CompletionEventObserved && !session.ObservedAutoRetainerActive && elapsed < StartTimeout)
         {
             Status = "Waiting for AutoRetainer single pass to start";
             return true;
         }
 
-        if (!completionEventReceived && !autoRetainerObservedActive)
+        if (!session.CompletionEventObserved && !session.ObservedAutoRetainerActive)
         {
             Fail(session, "AutoRetainer did not enter Multi Mode within 30 seconds");
             return true;
@@ -260,7 +292,10 @@ public sealed class AutoRetainerHandoffController : IDisposable
     {
         if (clientState.IsLoggedIn && playerState.ContentId == session.OriginalContentId)
         {
-            SetPhase(session, AutoRetainerHandoffPhase.Resuming);
+            if (IsPlayerSafe())
+                SetPhaseAfterOriginalCharacter(session);
+            else
+                Status = "Waiting for original character to become safe";
             return true;
         }
 
@@ -308,9 +343,36 @@ public sealed class AutoRetainerHandoffController : IDisposable
         }
 
         if (clientState.IsLoggedIn && playerState.ContentId == session.OriginalContentId && IsPlayerSafe())
-            SetPhase(session, AutoRetainerHandoffPhase.Resuming);
+            SetPhaseAfterOriginalCharacter(session);
         else
             Status = $"Waiting for {session.OriginalCharacterName}@{session.OriginalWorldName}";
+        return true;
+    }
+
+    private bool TickReturningTerritory(AutoRetainerHandoffSession session)
+    {
+        if (!clientState.IsLoggedIn || playerState.ContentId != session.OriginalContentId)
+        {
+            territoryReturnRoute.Reset();
+            SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalCharacter);
+            return true;
+        }
+
+        var result = territoryReturnRoute.Tick(session.OriginalTerritoryId, session.OriginalPosition,
+            clientState.TerritoryType, IsPlayerSafe(), DateTimeOffset.UtcNow);
+        if (result == TerritoryReturnResult.Arrived)
+        {
+            SetPhase(session, AutoRetainerHandoffPhase.Resuming);
+        }
+        else if (result == TerritoryReturnResult.Failed)
+        {
+            Fail(session, territoryReturnRoute.Failure ?? "Could not return to AutoRetainer origin territory");
+        }
+        else
+        {
+            Status = $"Returning to origin territory {session.OriginalTerritoryId}";
+        }
+
         return true;
     }
 
@@ -319,6 +381,13 @@ public sealed class AutoRetainerHandoffController : IDisposable
         if (!clientState.IsLoggedIn || playerState.ContentId != session.OriginalContentId || !IsPlayerSafe())
         {
             Status = "Waiting for original character to become safe";
+            return true;
+        }
+
+        if (clientState.TerritoryType != session.OriginalTerritoryId)
+        {
+            territoryReturnRoute.Reset();
+            SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalTerritory);
             return true;
         }
 
@@ -331,7 +400,6 @@ public sealed class AutoRetainerHandoffController : IDisposable
         else
             chain.PrepareForExternalHandoff("AutoRetainer pass complete; automator disabled");
         manualPassRequested = false;
-        autoRetainerObservedActive = false;
         completionEventReceived = false;
         Status = shouldResume ? "AutoRetainer pass complete; resuming FATE automation" : "AutoRetainer pass complete";
         return false;
@@ -368,11 +436,19 @@ public sealed class AutoRetainerHandoffController : IDisposable
             return;
         }
 
+        if (clientState.TerritoryType == 0)
+        {
+            Status = "AutoRetainer handoff requires a loaded origin territory";
+            return;
+        }
+
         var now = DateTimeOffset.UtcNow;
         var session = new AutoRetainerHandoffSession
         {
             Phase = AutoRetainerHandoffPhase.Starting,
             OriginalContentId = playerState.ContentId,
+            OriginalTerritoryId = clientState.TerritoryType,
+            OriginalPosition = player.Position,
             OriginalCharacterName = name,
             OriginalWorldName = world,
             WasAutomatorEnabled = configuration.AutomatorEnabled,
@@ -394,6 +470,25 @@ public sealed class AutoRetainerHandoffController : IDisposable
         session.Phase = phase;
         session.PhaseStartedAtUtc = DateTimeOffset.UtcNow;
         configuration.Save();
+    }
+
+    private void SetPhaseAfterOriginalCharacter(AutoRetainerHandoffSession session)
+    {
+        if (session.OriginalTerritoryId == 0)
+        {
+            Fail(session, "AutoRetainer origin territory unavailable; manual recovery required");
+            return;
+        }
+
+        if (clientState.TerritoryType == session.OriginalTerritoryId)
+        {
+            SetPhase(session, AutoRetainerHandoffPhase.Resuming);
+            return;
+        }
+
+        territoryReturnRoute.Reset();
+        SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalTerritory);
+        Status = $"Returning to origin territory {session.OriginalTerritoryId}";
     }
 
     private void Fail(AutoRetainerHandoffSession session, string reason)

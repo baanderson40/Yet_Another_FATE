@@ -5,8 +5,10 @@ using System.Text;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Plugin.Services;
 using YetAnotherFATE.Chains;
+using YetAnotherFATE.Config;
 using YetAnotherFATE.Data.Combat;
 using YetAnotherFATE.Data.Fates;
+using YetAnotherFATE.Data.Retainers;
 using YetAnotherFATE.Data.Travel;
 using YetAnotherFATE.Services.Fates;
 using YetAnotherFATE.Services.Combat;
@@ -28,6 +30,7 @@ public sealed class DebugRenderer
     private readonly ICombatPluginRegistry combatPlugins;
     private readonly AutomatorChain automatorChain;
     private readonly IFateRewardTracker rewardTracker;
+    private readonly Configuration configuration;
     private int selectedSection;
 
     public DebugRenderer(
@@ -41,7 +44,8 @@ public sealed class DebugRenderer
         IFateFollowUpTracker followUpTracker,
         ICombatPluginRegistry combatPlugins,
         AutomatorChain automatorChain,
-        IFateRewardTracker rewardTracker)
+        IFateRewardTracker rewardTracker,
+        Configuration configuration)
     {
         this.fateRepository = fateRepository;
         this.fateSelector = fateSelector;
@@ -54,6 +58,7 @@ public sealed class DebugRenderer
         this.combatPlugins = combatPlugins;
         this.automatorChain = automatorChain;
         this.rewardTracker = rewardTracker;
+        this.configuration = configuration;
     }
 
     public void Draw()
@@ -111,6 +116,13 @@ public sealed class DebugRenderer
 
     private void DrawFateSection(FateSelectionDiagnostics diagnostics)
     {
+        var detailedLogging = configuration.DiagnosticLoggingEnabled;
+        if (ImGui.Checkbox("Enable detailed diagnostic logging", ref detailedLogging))
+        {
+            configuration.DiagnosticLoggingEnabled = detailedLogging;
+            configuration.Save();
+        }
+        ImGui.Separator();
         ImGui.Text($"Territory: {clientState.TerritoryType} | Player loaded: {playerState.IsLoaded}");
         ImGui.Text($"Automator: {automatorChain.State} ({automatorChain.StateReason ?? "no reason"})");
         ImGui.Text($"Travel: {automatorChain.TravelPhase} ({automatorChain.TravelPhaseDetail ?? "n/a"})");
@@ -118,6 +130,35 @@ public sealed class DebugRenderer
         ImGui.Text($"Activation: {fateActivationService.Status}");
         ImGui.TextWrapped($"Zone rotation: {automatorChain.ZoneRotationStatus}");
         ImGui.Text($"Follow-up: {followUpTracker.Status}");
+        ImGui.Text($"Rewards completed: {rewardTracker.CompletedCount}");
+        if (rewardTracker.Remaining is { } remaining)
+        {
+            ImGui.SameLine();
+            ImGui.Text($"Remaining: {remaining}");
+        }
+        if (rewardTracker.PendingStop)
+            ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "Stop pending: waiting until safe");
+
+        if (configuration.AutoRetainerHandoffEnabled || automatorChain.AutoRetainerHandoffPhase != AutoRetainerHandoffPhase.Idle)
+        {
+            var readiness = automatorChain.AutoRetainerReadiness;
+            ImGui.TextWrapped($"AutoRetainer: {automatorChain.AutoRetainerHandoffStatus}");
+            if (readiness.RegisteredCharacterCount > 0)
+                ImGui.TextDisabled($"Ready characters: {readiness.ReadyCharacterCount}/{readiness.RegisteredCharacterCount} | Mode: {configuration.AutoRetainerMode}");
+            if (automatorChain.AutoRetainerHandoffPhase == AutoRetainerHandoffPhase.Failed)
+            {
+                if (ImGui.SmallButton("Retry##debug-retainer"))
+                    automatorChain.RetryAutoRetainerHandoff();
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Resume##debug-retainer"))
+                    automatorChain.ResumeAutoRetainerHandoff();
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Abandon##debug-retainer"))
+                    automatorChain.AbandonAutoRetainerHandoff();
+            }
+            else if (ImGui.SmallButton("Run pass now##debug-retainer"))
+                automatorChain.RequestAutoRetainerPass();
+        }
 
         if (diagnostics.Candidates.Count == 0)
         {

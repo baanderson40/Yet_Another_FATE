@@ -8,6 +8,7 @@ public enum AutoRetainerHandoffPhase
     WaitingForAutoRetainer,
     ReturningOriginalCharacter,
     WaitingForOriginalCharacter,
+    ReturningOriginalTerritory,
     Resuming,
     Failed,
 }
