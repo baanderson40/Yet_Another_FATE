@@ -8,6 +8,7 @@ using FFXIVClientStructs.FFXIV.Client.Game.Fate;
 using YetAnotherFATE.Config;
 using YetAnotherFATE.Data.Automator;
 using YetAnotherFATE.Data.Fates;
+using YetAnotherFATE.Data.Retainers;
 using YetAnotherFATE.Data.Travel;
 using YetAnotherFATE.Modules.Automator.Handlers;
 using YetAnotherFATE.Services.Combat.BossMod;
@@ -16,6 +17,7 @@ using YetAnotherFATE.Services.Combat.Wrath;
 using YetAnotherFATE.Services.Fates.CombatHelper.Engagement;
 using YetAnotherFATE.Services.Travel;
 using YetAnotherFATE.Services.Fates;
+using YetAnotherFATE.Services.Retainers;
 
 namespace YetAnotherFATE.Chains;
 
@@ -31,6 +33,7 @@ public sealed class AutomatorChain : IDisposable
     private readonly IBossModObstacleMap obstacleMap;
     private readonly FateObstacleMapAssurance mapAssurance;
     private readonly AutomaticTravelPolicy automaticTravel;
+    private readonly AutoRetainerHandoffController? autoRetainerHandoff;
     private uint territory;
     private readonly ITextAdvanceClient textAdvance;
     private readonly IFateRewardTracker rewardTracker;
@@ -57,6 +60,9 @@ public sealed class AutomatorChain : IDisposable
     public FateSelection? CurrentSelection => context.CurrentSelection;
     public RecoveryPhase RecoveryPhase => recoveringHandler?.Phase ?? RecoveryPhase.Idle;
     public string ZoneRotationStatus => rotatingHandler?.Rotation.Status ?? "Unavailable";
+    public AutoRetainerHandoffPhase AutoRetainerHandoffPhase => autoRetainerHandoff?.Phase ?? AutoRetainerHandoffPhase.Idle;
+    public string AutoRetainerHandoffStatus => autoRetainerHandoff?.Status ?? "Unavailable";
+    public AutoRetainerReadinessSnapshot AutoRetainerReadiness => autoRetainerHandoff?.LastReadiness ?? default;
 
     public AutomatorChain(
         ITravelController travelController,
@@ -76,7 +82,8 @@ public sealed class AutomatorChain : IDisposable
         IWrathComboBridge wrathComboBridge,
         IFateCombatHandler combatHandler,
         FateObstacleMapAssurance mapAssurance,
-        AutomaticTravelPolicy automaticTravel)
+        AutomaticTravelPolicy automaticTravel,
+        AutoRetainerHandoffController? autoRetainerHandoff = null)
     {
         this.travelController = travelController;
         this.log = log;
@@ -99,8 +106,67 @@ public sealed class AutomatorChain : IDisposable
         this.combatHandler = combatHandler;
         this.mapAssurance = mapAssurance;
         this.automaticTravel = automaticTravel;
+        this.autoRetainerHandoff = autoRetainerHandoff;
 
         travelController.PhaseChanged += OnTravelPhaseChanged;
+    }
+
+    public void RequestAutoRetainerPass() => autoRetainerHandoff?.RequestManualPass();
+    public bool RetryAutoRetainerHandoff() => autoRetainerHandoff?.RetryFailedSession() == true;
+    public bool ResumeAutoRetainerHandoff() => autoRetainerHandoff?.ResumeFailedSession() == true;
+    public bool AbandonAutoRetainerHandoff() => autoRetainerHandoff?.AbandonFailedSession() == true;
+
+    public unsafe bool CanStartAutoRetainerHandoff()
+    {
+        if (context.State is not (AutomatorState.Disabled or AutomatorState.SelectingFate) ||
+            context.CurrentSelection is not null ||
+            travelController.CurrentJob is not null ||
+            rewardTracker.PendingStop ||
+            followUpTracker.IsWatching ||
+            condition[ConditionFlag.InCombat] ||
+            condition[ConditionFlag.Casting] ||
+            condition[ConditionFlag.Occupied] ||
+            condition[ConditionFlag.OccupiedInEvent] ||
+            condition[ConditionFlag.OccupiedInQuestEvent] ||
+            condition[ConditionFlag.BetweenAreas] ||
+            condition[ConditionFlag.BetweenAreas51] ||
+            objectTable.LocalPlayer is not { CurrentHp: > 0 })
+            return false;
+
+        var fateManager = FateManager.Instance();
+        return fateManager == null || fateManager->CurrentFate == null;
+    }
+
+    public bool CanResumeAfterAutoRetainerHandoff()
+        => clientState.IsLoggedIn && objectTable.LocalPlayer is { CurrentHp: > 0 } &&
+           !condition[ConditionFlag.BetweenAreas] && !condition[ConditionFlag.BetweenAreas51] &&
+           !condition[ConditionFlag.InCombat] && !condition[ConditionFlag.Occupied] &&
+           !condition[ConditionFlag.OccupiedInEvent] && !condition[ConditionFlag.OccupiedInQuestEvent];
+
+    public void PrepareForExternalHandoff(string reason)
+    {
+        travelController.Cancel(reason, TravelRequestKind.Automatic);
+        textAdvance.Disable();
+        followUpTracker.Clear();
+        completionTracker.Reset();
+        obstacleMap.ClearTemporaryMap();
+        mapAssurance.Reset();
+        rotatingHandler?.Rotation.Suspend(reason);
+        bossModPresetManager.DeactivateActivePreset();
+        rotationSolverBridge.NotifyFateEnded();
+        wrathComboBridge.NotifyAutomationStopped();
+        combatHandler.Reset(reason);
+        foreach (var handler in handlers)
+            handler.Reset();
+        context.Reset(log);
+    }
+
+    public void ResumeAfterAutoRetainerHandoff()
+    {
+        if (!configuration.AutomatorEnabled)
+            return;
+        context.Reset(log);
+        context.TransitionTo(AutomatorState.SelectingFate, "AutoRetainer handoff complete", log);
     }
 
     public void Tick()
@@ -113,6 +179,8 @@ public sealed class AutomatorChain : IDisposable
         rewardTracker.SynchronizeSession();
         automaticTravel.Synchronize();
         rotatingHandler?.Rotation.SynchronizeSettings();
+        if (autoRetainerHandoff?.Tick(this) == true)
+            return;
         if (objectTable.LocalPlayer == null || condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51])
             rotatingHandler?.Rotation.InvalidateReadiness();
         if (!configuration.AutomatorEnabled || !clientState.IsLoggedIn)
@@ -209,6 +277,21 @@ public sealed class AutomatorChain : IDisposable
                 textAdvance.Disable();
                 return;
             }
+        }
+
+        if (condition[ConditionFlag.InCombat] && context.State is
+            (AutomatorState.SelectingFate or AutomatorState.Travelling or AutomatorState.ActivatingFate or
+             AutomatorState.PostFate or AutomatorState.RotatingZone))
+        {
+            context.CombatClearanceReturnState = context.State;
+            travelController.Cancel("Combat started; clearing aggro", TravelRequestKind.Automatic);
+            textAdvance.Disable();
+            bossModPresetManager.DeactivateActivePreset();
+            rotationSolverBridge.NotifyFateEnded();
+            wrathComboBridge.NotifyAutomationStopped();
+            combatHandler.Reset("Combat started outside FATE participation");
+            context.TransitionTo(AutomatorState.ClearingCombat, "Combat started; clearing aggro before automation", log);
+            return;
         }
 
         if (context.State == AutomatorState.SelectingFate && rotatingHandler?.TryOwnSelection(context) == true)

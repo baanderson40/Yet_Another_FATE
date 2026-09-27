@@ -115,6 +115,28 @@ public sealed class MainRenderer
             ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "Stop pending: waiting until safe");
         }
 
+        if (configuration.AutoRetainerHandoffEnabled || automatorChain.AutoRetainerHandoffPhase != Data.Retainers.AutoRetainerHandoffPhase.Idle)
+        {
+            var readiness = automatorChain.AutoRetainerReadiness;
+            ImGui.TextWrapped($"AutoRetainer: {automatorChain.AutoRetainerHandoffStatus}");
+            if (readiness.RegisteredCharacterCount > 0)
+                ImGui.TextDisabled($"Ready characters: {readiness.ReadyCharacterCount}/{readiness.RegisteredCharacterCount} | Mode: {configuration.AutoRetainerMode}");
+            ImGui.SameLine();
+            if (automatorChain.AutoRetainerHandoffPhase == Data.Retainers.AutoRetainerHandoffPhase.Failed)
+            {
+                if (ImGui.SmallButton("Retry"))
+                    automatorChain.RetryAutoRetainerHandoff();
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Resume"))
+                    automatorChain.ResumeAutoRetainerHandoff();
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Abandon"))
+                    automatorChain.AbandonAutoRetainerHandoff();
+            }
+            else if (ImGui.SmallButton("Run pass now"))
+                automatorChain.RequestAutoRetainerPass();
+        }
+
         if (followUpTracker.IsWatching)
         {
             ImGui.TextDisabled(followUpTracker.Status);

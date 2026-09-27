@@ -8,6 +8,17 @@ namespace YetAnotherFATE.Services.Fates.CombatHelper.Targeter;
 
 public static unsafe class FateTargetPolicy
 {
+    public const uint ForlornMaidenNameId = 6737;
+    public const uint TheForlornNameId = 6738;
+
+    public static int GetForlornPriority(uint nameId)
+        => nameId switch
+        {
+            TheForlornNameId => 2,
+            ForlornMaidenNameId => 1,
+            _ => 0,
+        };
+
     public static bool IsValidCombatTarget(IBattleNpc npc, ActiveFate fate)
         => GetExclusionReason(npc, fate) == null;
 

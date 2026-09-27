@@ -77,10 +77,13 @@ public sealed class FateTargetTracker : IFateTargetTracker
 
             var hpRatio = npc.MaxHp > 0 ? (double)npc.CurrentHp / npc.MaxHp : 1.0;
             var score = ComputeScore(distanceFromPlayer, hpRatio);
+            var forlornPriority = FateTargetPolicy.GetForlornPriority(npc.NameId);
 
             var snapshot = new FateTargetSnapshot(
                 npc.GameObjectId,
                 npc.BaseId,
+                npc.NameId,
+                forlornPriority,
                 DetermineName(npc),
                 position,
                 distanceFromPlayer,
@@ -100,7 +103,11 @@ public sealed class FateTargetTracker : IFateTargetTracker
             return null;
         }
 
-        var next = candidates.OrderByDescending(c => c.Score).ThenBy(c => c.DistanceFromPlayer).First();
+        var next = candidates
+            .OrderByDescending(c => c.ForlornPriority)
+            .ThenByDescending(c => c.Score)
+            .ThenBy(c => c.DistanceFromPlayer)
+            .First();
         if (currentTarget is null || currentTarget.Value.ObjectId != next.ObjectId)
         {
             var previous = currentTarget;
@@ -158,10 +165,12 @@ public sealed class FateTargetTracker : IFateTargetTracker
         }
 
         log.Debug(
-            "FateTargetTracker: fate #{FateId} target #{ObjectId} {Name} dist={Distance:F1}y hp={Hp}/{MaxHp}",
+            "FateTargetTracker: fate #{FateId} target #{ObjectId} {Name} nameId={NameId} forlornPriority={ForlornPriority} dist={Distance:F1}y hp={Hp}/{MaxHp}",
             selection.Fate.FateId,
             snapshot.ObjectId,
             snapshot.Name,
+            snapshot.NameId,
+            snapshot.ForlornPriority,
             snapshot.DistanceFromPlayer,
             snapshot.CurrentHp,
             snapshot.MaxHp);

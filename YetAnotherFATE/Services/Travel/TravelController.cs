@@ -250,6 +250,13 @@ public sealed class TravelController : ITravelController, IDisposable
 
             if (job.Kind == TravelRequestKind.Automatic && job.Selection.ShouldTeleport && job.Selection.Teleport.AetheryteId.HasValue)
             {
+                if (!await WaitForCombatClearAsync(token).ConfigureAwait(false))
+                {
+                    if (!token.IsCancellationRequested)
+                        FailJob(job.JobId, "Combat remained active before teleporting");
+                    return;
+                }
+
                 UpdatePhaseInternal(job.JobId, TravelPhase.TeleportQueued, $"teleport target {job.Selection.Teleport.AetheryteName ?? job.Selection.Teleport.AetheryteId.Value.ToString()}");
                 var teleported = await ExecuteTeleportAsync(job.JobId, job.Selection, token).ConfigureAwait(false);
                 if (!teleported)
@@ -268,6 +275,13 @@ public sealed class TravelController : ITravelController, IDisposable
             }
 
             token.ThrowIfCancellationRequested();
+
+            if (!await WaitForCombatClearAsync(token).ConfigureAwait(false))
+            {
+                if (!token.IsCancellationRequested)
+                    FailJob(job.JobId, "Combat remained active before mounting");
+                return;
+            }
 
             UpdatePhaseInternal(job.JobId, TravelPhase.Mounting, "Ensuring mount");
             var travelDistance = await RunForJobOnFrameworkThreadAsync(job.JobId, () => GetTravelDistance(job.Selection), token).ConfigureAwait(false);
@@ -292,6 +306,13 @@ public sealed class TravelController : ITravelController, IDisposable
             token.ThrowIfCancellationRequested();
 
             await PrepareObstacleMapAsync(job, token).ConfigureAwait(false);
+
+            if (!await WaitForCombatClearAsync(token).ConfigureAwait(false))
+            {
+                if (!token.IsCancellationRequested)
+                    FailJob(job.JobId, "Combat resumed before movement");
+                return;
+            }
 
             UpdatePhaseInternal(job.JobId, TravelPhase.Moving, "Issuing navmesh move");
             if (!await TryReachDestinationAsync(job, token).ConfigureAwait(false))
@@ -740,6 +761,28 @@ public sealed class TravelController : ITravelController, IDisposable
         }
 
         return await IsConditionActiveAsync(ConditionFlag.Mounted, token).ConfigureAwait(false);
+    }
+
+    private async Task<bool> WaitForCombatClearAsync(CancellationToken token)
+    {
+        DateTimeOffset clearSince = DateTimeOffset.MinValue;
+        while (!token.IsCancellationRequested)
+        {
+            if (condition[ConditionFlag.InCombat])
+            {
+                clearSince = DateTimeOffset.MinValue;
+            }
+            else
+            {
+                clearSince = clearSince == DateTimeOffset.MinValue ? DateTimeOffset.UtcNow : clearSince;
+                if (DateTimeOffset.UtcNow - clearSince >= TimeSpan.FromSeconds(1))
+                    return true;
+            }
+
+            await Task.Delay(PollInterval, token).ConfigureAwait(false);
+        }
+
+        return !token.IsCancellationRequested;
     }
 
     private async Task<bool> TryNavmeshMoveAsync(Guid jobId, Vector3 destination, CancellationToken token)

@@ -26,6 +26,7 @@ using YetAnotherFATE.Windows;
 using YetAnotherFATE.Services.Combat.RotationSolver;
 using YetAnotherFATE.Services.Combat.Wrath;
 using YetAnotherFATE.Services.Combat.BossMod;
+using YetAnotherFATE.Services.Retainers;
 
 namespace YetAnotherFATE;
 
@@ -120,9 +121,13 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton<UxModule>();
         services.AddSingleton<AutomatorModule>();
         services.AddSingleton<AutomatorChain>();
+        services.AddSingleton<IAutoRetainerClient, AutoRetainerClient>();
+        services.AddSingleton<ILifestreamCharacterClient, LifestreamCharacterClient>();
+        services.AddSingleton<AutoRetainerHandoffController>();
         services.AddSingleton<IAutomatorStateHandler, TravellingToFateStateHandler>();
         services.AddSingleton<IAutomatorStateHandler, ActivatingFateStateHandler>();
         services.AddSingleton<IAutomatorStateHandler, RecoveringStateHandler>();
+        services.AddSingleton<IAutomatorStateHandler, ClearingCombatStateHandler>();
         services.AddSingleton<IAutomatorStateHandler, RotatingZoneStateHandler>();
         services.AddSingleton<ZoneRotationController>();
         services.AddSingleton<AutomaticTravelPolicy>();
@@ -139,6 +144,7 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<IChatGui>(),
             provider.GetRequiredService<IFateRewardTracker>(),
             provider.GetRequiredService<ZoneRotationController>(),
+            provider.GetRequiredService<AutoRetainerHandoffController>(),
             provider.GetRequiredService<IPluginLog>()));
         services.AddSingleton<IMainCommand, MainCommand>();
 

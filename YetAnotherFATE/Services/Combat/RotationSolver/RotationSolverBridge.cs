@@ -54,6 +54,28 @@ public sealed class RotationSolverBridge : IRotationSolverBridge
         }
     }
 
+    public void EngageNearestAuto()
+    {
+        if (autoEngaged && DateTimeOffset.UtcNow < nextEngageRefresh)
+            return;
+
+        if (!TryInitializeIpc())
+            return;
+
+        try
+        {
+            autodutySubscriber?.InvokeAction(StateAuto, TargetNearest);
+            engagedFateId = null;
+            autoEngaged = true;
+            nextEngageRefresh = DateTimeOffset.UtcNow.AddSeconds(5);
+            log.Debug("RotationSolverBridge: engaged auto targeting for combat clearance");
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "RotationSolverBridge: failed to engage auto targeting for combat clearance");
+        }
+    }
+
     public void NotifyFateEnded()
     {
         engagedFateId = null;

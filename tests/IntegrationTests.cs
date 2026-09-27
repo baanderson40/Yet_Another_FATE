@@ -11,6 +11,7 @@ using YetAnotherFATE.Config;
 using YetAnotherFATE.Data.Fates;
 using YetAnotherFATE.Services.Fates;
 using YetAnotherFATE.Services.Travel;
+using YetAnotherFATE.Services.Retainers;
 using YetAnotherFATE.Data.Travel;
 using YetAnotherFATE.Chains;
 using YetAnotherFATE.Modules.Automator.Handlers;
@@ -31,6 +32,12 @@ using System.Numerics;
 
 class Program
 {
+    private sealed class RetainerConfigurationFixture
+    {
+        public int AdvanceTimer = 60;
+        public bool MultiWaitForAll = true;
+    }
+
     static int checks;
     static void Check(bool condition, string label) { if (!condition) throw new Exception(label); checks++; }
     static void Main()
@@ -112,13 +119,26 @@ class Program
         var fateNameplate = typeof(FateTargetPolicy).GetMethod("IsKnownFateNpcNameplate", BindingFlags.Static | BindingFlags.Public)!;
         Check((bool)fateNameplate.Invoke(null, [60093U])! && (bool)fateNameplate.Invoke(null, [60732U])!, "known FATE NPC nameplates rejected");
         Check(!(bool)fateNameplate.Invoke(null, [0U])!, "ordinary nameplate remains eligible for further filtering");
+        Check(FateTargetPolicy.GetForlornPriority(6737) == 1, "Forlorn Maiden NameId detected");
+        Check(FateTargetPolicy.GetForlornPriority(6738) == 2, "The Forlorn NameId detected and preferred");
+        Check(FateTargetPolicy.GetForlornPriority(1) == 0, "ordinary NameId has no Forlorn priority");
         var pi = DispatchProxy.Create<IDalamudPluginInterface, Noop>();
         var migrated = new Configuration { FateMinTimeRemainingSeconds = 240 };
-        migrated.Initialize(pi); Check(migrated.Version == 1 && migrated.FateMinTimeRemainingSeconds == 120, "old erroneous default migrated");
+        migrated.Initialize(pi); Check(migrated.Version == 2 && migrated.FateMinTimeRemainingSeconds == 120, "old erroneous default migrated");
         var custom = new Configuration { FateMinTimeRemainingSeconds = 75 };
         custom.Initialize(pi); Check(custom.FateMinTimeRemainingSeconds == 75, "custom minimum retained");
         var explicit240 = new Configuration { Version = 1, FateMinTimeRemainingSeconds = 240 };
         explicit240.Initialize(pi); Check(explicit240.FateMinTimeRemainingSeconds == 240, "versioned choice retained");
+        var retainerReady = typeof(AutoRetainerClient).GetMethod("IsRetainerReady", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Check((bool)retainerReady.Invoke(null, [new long[] { 30, 45 }, 30L, true, 60L])!, "all retainers honor advance threshold");
+        Check(!(bool)retainerReady.Invoke(null, [new long[] { 30, 90 }, 30L, true, 60L])!, "wait-for-all blocks on late retainer");
+        Check((bool)retainerReady.Invoke(null, [new long[] { 90 }, 30L, false, 60L])!, "any-retainer mode uses closest ready retainer");
+        var memberReader = typeof(AutoRetainerClient).GetMethod("ReadMember", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var fixture = new RetainerConfigurationFixture();
+        Check((long)memberReader.MakeGenericMethod(typeof(long)).Invoke(null, [fixture.GetType(), fixture, "AdvanceTimer", 0L])! == 60,
+            "AutoRetainer advance field is read");
+        Check((bool)memberReader.MakeGenericMethod(typeof(bool)).Invoke(null, [fixture.GetType(), fixture, "MultiWaitForAll", false])!,
+            "AutoRetainer wait-for-all field is read");
         Check((int)FateSortCriteria.HasBonus == 1 && (int)FateSortCriteria.Progress == 2 && (int)FateSortCriteria.Distance == 5 && (int)FateSortCriteria.TimeRemaining == 4, "persisted criterion values stable");
         var follow = new FateFollowUpTracker(config);
         var fate = default(ActiveFate) with { FateId = 10, TerritoryId = 100, HasSheetMetadata = true, HasFollowUp = true, LocationId = 9, Progress = 100 };

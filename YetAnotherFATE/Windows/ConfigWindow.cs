@@ -6,6 +6,7 @@ using Dalamud.Interface.Windowing;
 using YetAnotherFATE.Config;
 using YetAnotherFATE.Data.Combat;
 using YetAnotherFATE.Data.Fates;
+using YetAnotherFATE.Data.Retainers;
 using YetAnotherFATE.Services.Combat;
 using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
@@ -65,6 +66,8 @@ public class ConfigWindow : Window, IDisposable
         DrawTeleportSection();
         ImGui.Separator();
         DrawZoneRotationSection();
+        ImGui.Separator();
+        DrawAutoRetainerSection();
         ImGui.NewLine();
     }
 
@@ -134,6 +137,39 @@ public class ConfigWindow : Window, IDisposable
             }
             ImGui.EndCombo();
         }
+    }
+
+    private void DrawAutoRetainerSection()
+    {
+        ImGui.TextUnformatted("AutoRetainer handoff");
+        var enabled = configuration.AutoRetainerHandoffEnabled;
+        if (ImGui.Checkbox("Pause farming for AutoRetainer", ref enabled))
+        {
+            configuration.AutoRetainerHandoffEnabled = enabled;
+            configuration.Save();
+        }
+
+        ImGui.SetNextItemWidth(ControlWidth);
+        var modeLabel = configuration.AutoRetainerMode.ToString();
+        if (ImGui.BeginCombo("Single-pass mode", modeLabel))
+        {
+            foreach (var mode in Enum.GetValues<AutoRetainerMode>())
+            {
+                var selected = mode == configuration.AutoRetainerMode;
+                if (ImGui.Selectable(mode.ToString(), selected))
+                {
+                    configuration.AutoRetainerMode = mode;
+                    configuration.Save();
+                }
+            }
+            ImGui.EndCombo();
+        }
+
+        DrawIntegerSetting("Readiness check (s)", configuration.AutoRetainerReadinessIntervalSeconds, 15, 600,
+            value => configuration.AutoRetainerReadinessIntervalSeconds = value);
+        DrawIntegerSetting("Retry cooldown (s)", configuration.AutoRetainerRetryCooldownSeconds, 30, 1800,
+            value => configuration.AutoRetainerRetryCooldownSeconds = value);
+        ImGui.TextWrapped("AutoRetainer owns character switching and retainer routing. YAF resumes after returning to the original character.");
     }
 
     private void DrawDisplaySection()

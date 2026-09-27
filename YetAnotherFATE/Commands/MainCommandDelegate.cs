@@ -6,6 +6,7 @@ using YetAnotherFATE.Services.Fates;
 using YetAnotherFATE.Services.Movement;
 using YetAnotherFATE.Services.Travel;
 using YetAnotherFATE.Data.Travel;
+using YetAnotherFATE.Services.Retainers;
 
 namespace YetAnotherFATE.Commands;
 
@@ -22,6 +23,7 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
     private readonly IPluginLog log;
     private readonly IFateRewardTracker rewardTracker;
     private readonly ZoneRotationController zoneRotation;
+    private readonly AutoRetainerHandoffController autoRetainerHandoff;
 
     public MainCommandDelegate(
         UxModule uxModule,
@@ -34,6 +36,7 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
         IChatGui chatGui,
         IFateRewardTracker rewardTracker,
         ZoneRotationController zoneRotation,
+        AutoRetainerHandoffController autoRetainerHandoff,
         IPluginLog log)
     {
         this.uxModule = uxModule;
@@ -46,6 +49,7 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
         this.chatGui = chatGui;
         this.rewardTracker = rewardTracker;
         this.zoneRotation = zoneRotation;
+        this.autoRetainerHandoff = autoRetainerHandoff;
         this.log = log;
     }
 
@@ -112,6 +116,39 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
 
             rewardTracker.Start(count);
             chatGui.Print($"YAFate: running until {count} FATE rewards");
+            return;
+        }
+
+        if (string.Equals(trimmed, "retainers", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.Equals(commandArg, "now", StringComparison.OrdinalIgnoreCase))
+            {
+                autoRetainerHandoff.RequestManualPass();
+                chatGui.Print("YAFate: AutoRetainer pass requested; waiting for a safe boundary");
+            }
+            else if (string.Equals(commandArg, "retry", StringComparison.OrdinalIgnoreCase))
+            {
+                chatGui.Print(autoRetainerHandoff.RetryFailedSession()
+                    ? "YAFate: AutoRetainer handoff retry requested"
+                    : "YAFate: no failed AutoRetainer handoff to retry");
+            }
+            else if (string.Equals(commandArg, "resume", StringComparison.OrdinalIgnoreCase))
+            {
+                chatGui.Print(autoRetainerHandoff.ResumeFailedSession()
+                    ? "YAFate: AutoRetainer handoff resume requested"
+                    : "YAFate: no failed AutoRetainer handoff to resume");
+            }
+            else if (string.Equals(commandArg, "abandon", StringComparison.OrdinalIgnoreCase))
+            {
+                chatGui.Print(autoRetainerHandoff.AbandonFailedSession()
+                    ? "YAFate: AutoRetainer handoff abandoned"
+                    : "YAFate: no failed AutoRetainer handoff to abandon");
+            }
+            else
+            {
+                var readiness = autoRetainerHandoff.LastReadiness;
+                chatGui.Print($"YAFate AutoRetainer: phase={autoRetainerHandoff.Phase}, status={autoRetainerHandoff.Status}, ready={readiness.WorkReady} ({readiness.ReadyCharacterCount}/{readiness.RegisteredCharacterCount})");
+            }
             return;
         }
 

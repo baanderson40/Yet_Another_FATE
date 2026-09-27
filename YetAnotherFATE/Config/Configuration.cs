@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Numerics;
 using YetAnotherFATE.Data.Combat;
 using YetAnotherFATE.Data.Fates;
+using YetAnotherFATE.Data.Retainers;
 
 namespace YetAnotherFATE.Config;
 
@@ -58,6 +59,12 @@ public class Configuration : IPluginConfiguration
     public CombatPluginId PreferredRotationProvider { get; set; } = CombatPluginId.None;
     public CombatPluginId PreferredDodgeProvider { get; set; } = CombatPluginId.None;
 
+    public bool AutoRetainerHandoffEnabled { get; set; } = false;
+    public AutoRetainerMode AutoRetainerMode { get; set; } = AutoRetainerMode.Retainers;
+    public int AutoRetainerReadinessIntervalSeconds { get; set; } = 60;
+    public int AutoRetainerRetryCooldownSeconds { get; set; } = 120;
+    public AutoRetainerHandoffSession? AutoRetainerHandoff { get; set; }
+
     [NonSerialized]
     private IDalamudPluginInterface? pluginInterface;
 
@@ -71,6 +78,16 @@ public class Configuration : IPluginConfiguration
             if (FateMinTimeRemainingSeconds == 240)
                 FateMinTimeRemainingSeconds = 120;
             Version = 1;
+            Save();
+        }
+        if (Version < 2)
+        {
+            AutoRetainerMode = Enum.IsDefined(typeof(AutoRetainerMode), AutoRetainerMode)
+                ? AutoRetainerMode
+                : YetAnotherFATE.Data.Retainers.AutoRetainerMode.Retainers;
+            AutoRetainerReadinessIntervalSeconds = Math.Clamp(AutoRetainerReadinessIntervalSeconds, 15, 600);
+            AutoRetainerRetryCooldownSeconds = Math.Clamp(AutoRetainerRetryCooldownSeconds, 30, 1800);
+            Version = 2;
             Save();
         }
     }

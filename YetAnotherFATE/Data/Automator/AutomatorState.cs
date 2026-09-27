@@ -8,6 +8,7 @@ public enum AutomatorState
     ActivatingFate,
     Participating,
     Recovering,
+    ClearingCombat,
     PostFate,
     RotatingZone,
 }

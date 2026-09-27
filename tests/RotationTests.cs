@@ -214,12 +214,17 @@ static class RotationTests
             var boss = new BossModPresetManager(Stub<IDalamudPluginInterface>(), Stub<ICombatPluginRegistry>(), config, log, playerState);
             var combatHandler = Stub<IFateCombatHandler>(); var text = Stub<ITextAdvanceClient>(); var map = Stub<IBossModObstacleMap>();
             var completion = new FateCompletionTracker();
-            var participant = new ParticipatingInFateStateHandler(repo, combatHandler, Stub<ILevelSyncService>(), Stub<ICombatPluginRegistry>(),
-                Stub<IRotationSolverBridge>(), Stub<IWrathComboBridge>(), boss, config, travel, follow, text, map, completion,
+            var combatPlugins = Stub<ICombatPluginRegistry>();
+            var rotationBridge = Stub<IRotationSolverBridge>();
+            var wrathBridge = Stub<IWrathComboBridge>();
+            var participant = new ParticipatingInFateStateHandler(repo, combatHandler, Stub<ILevelSyncService>(), combatPlugins,
+                rotationBridge, wrathBridge, boss, config, travel, follow, text, map, completion,
                 conditions, rewards, Stub<IGameGui>(), objects, automaticTravel, log);
+            var clearing = new ClearingCombatStateHandler(combatPlugins, rotationBridge, wrathBridge, boss, config, travel,
+                combatHandler, text, conditions, log);
             var probe = new ProbeHandler();
             using var chain = new AutomatorChain(travel, log, conditions, client, objects, follow, completion, map, text,
-                rewards, config, [handler, participant, probe], boss, Stub<IRotationSolverBridge>(), Stub<IWrathComboBridge>(), combatHandler,
+                rewards, config, [handler, participant, clearing, probe], boss, rotationBridge, wrathBridge, combatHandler,
                 new FateObstacleMapAssurance(map, Stub<YetAnotherFATE.Services.Movement.INavmeshClient>()), automaticTravel);
             var context = (AutomatorContext)typeof(AutomatorChain).GetField("context", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(chain)!;
             if (scenario == "followup") follow.Begin(default(ActiveFate) with { HasFollowUp = true, TerritoryId = 1, HasSheetMetadata = true, LocationId = 9 });
@@ -268,7 +273,17 @@ static class RotationTests
                 Check(requests == 1, scenario + " resumes rotation when automatic travel drains");
                 continue;
             }
-            if (scenario is "followup" or "combat" or "local" or "collect" or "cast" or "not-ready")
+            if (scenario == "combat")
+            {
+                Check(chain.State == AutomatorState.ClearingCombat && requests == 0, "combat enters dedicated clearance state");
+                combat = false;
+                chain.Tick();
+                System.Threading.Thread.Sleep(1100);
+                chain.Tick();
+                Check(chain.State == AutomatorState.SelectingFate, "combat clearance resumes selection after aggro ends");
+                continue;
+            }
+            if (scenario is "followup" or "local" or "collect" or "cast" or "not-ready")
             {
                 Check(requests == 0, scenario + " must finish/wait before rotation");
                 continue;
