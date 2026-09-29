@@ -41,7 +41,6 @@ public sealed class TravelController : ITravelController, IDisposable
     private const float LandingMaxVerticalDelta = 12f;
     private const float LandingMaxProjectionDrift = 8f;
     private const float LandingMaxEntityDistance = 20f;
-    private const float GroundLandingMaxDetour = 60f;
     private const float LandingReplanMinShift = 9f;
     private const float ShortCorrectionDistance = 30f;
     private const float FateFallbackBoundaryPadding = 5f;
@@ -403,20 +402,20 @@ public sealed class TravelController : ITravelController, IDisposable
     private async Task<bool> TryReachDestinationAsync(TravelJob job, CancellationToken token)
     {
         var strictDestination = job.ArrivalRadius < DefaultArrivalRadius;
-        var destinations = strictDestination
-            ? new List<Vector3> { job.Selection.Destination }
-            : await ResolveFateLandingDestinationsAsync(job, token).ConfigureAwait(false);
+        var fly = await RunForJobOnFrameworkThreadAsync(job.JobId, CanFlyForMovement, token).ConfigureAwait(false);
+        var useFlightApproach = ShouldUseFlightApproach(strictDestination, fly);
+        var destinations = useFlightApproach
+            ? await ResolveFateLandingDestinationsAsync(job, token).ConfigureAwait(false)
+            : new List<Vector3> { job.Selection.Destination };
         if (destinations.Count == 0)
         {
             log.Warning("TravelController: no landable approach point found for FATE {FateId}", job.Selection.Fate.FateId);
             return false;
         }
-        if (!strictDestination && !await RunForJobOnFrameworkThreadAsync(job.JobId, CanFlyForMovement, token).ConfigureAwait(false))
-            destinations = await FilterGroundLandingDestinationsAsync(job, destinations, token).ConfigureAwait(false);
 
         for (var attempt = 0; attempt < destinations.Count; attempt++)
         {
-            if (!await TryNavmeshMoveAsync(job.JobId, destinations[attempt], token).ConfigureAwait(false))
+            if (!await TryNavmeshMoveAsync(job.JobId, destinations[attempt], fly, token).ConfigureAwait(false))
             {
                 continue;
             }
@@ -424,7 +423,7 @@ public sealed class TravelController : ITravelController, IDisposable
             try
             {
                 var attemptJob = job with { Selection = job.Selection with { Destination = destinations[attempt] } };
-                await MonitorArrivalAsync(attemptJob, token).ConfigureAwait(false);
+                await MonitorArrivalAsync(attemptJob, fly, useFlightApproach, token).ConfigureAwait(false);
                 return true;
             }
             catch (TimeoutException) when (attempt + 1 < destinations.Count)
@@ -435,43 +434,6 @@ public sealed class TravelController : ITravelController, IDisposable
         }
 
         return false;
-    }
-
-    private async Task<List<Vector3>> FilterGroundLandingDestinationsAsync(TravelJob job, List<Vector3> destinations, CancellationToken token)
-    {
-        var playerPosition = await TryGetPlayerPositionAsync(token).ConfigureAwait(false);
-        if (playerPosition is not { } from)
-            return destinations;
-
-        var filtered = new List<Vector3>();
-        var querySucceeded = false;
-        foreach (var destination in destinations)
-        {
-            var path = await navmeshClient.Pathfind(from, destination, fly: false).ConfigureAwait(false);
-            if (path == null)
-                continue;
-
-            querySucceeded = true;
-            if (path.Count == 0)
-                continue;
-
-            var pathDistance = Vector3.Distance(from, path[0]);
-            for (var index = 1; index < path.Count; index++)
-                pathDistance += Vector3.Distance(path[index - 1], path[index]);
-            pathDistance += Vector3.Distance(path[^1], destination);
-
-            if (pathDistance <= Vector3.Distance(from, destination) + GroundLandingMaxDetour)
-                filtered.Add(destination);
-        }
-
-        if (querySucceeded)
-        {
-            log.Debug("TravelController: retained {Retained}/{Total} ground-reachable FATE landing points", filtered.Count, destinations.Count);
-            return filtered;
-        }
-
-        log.Debug("TravelController: ground path query unavailable; retaining projected landing points");
-        return destinations;
     }
 
     private async Task<List<Vector3>> ResolveFateLandingDestinationsAsync(TravelJob job, CancellationToken token)
@@ -785,7 +747,7 @@ public sealed class TravelController : ITravelController, IDisposable
         return !token.IsCancellationRequested;
     }
 
-    private async Task<bool> TryNavmeshMoveAsync(Guid jobId, Vector3 destination, CancellationToken token)
+    private async Task<bool> TryNavmeshMoveAsync(Guid jobId, Vector3 destination, bool fly, CancellationToken token)
     {
         if (!navmeshClient.IsAvailable)
         {
@@ -806,8 +768,7 @@ public sealed class TravelController : ITravelController, IDisposable
                 jobId,
                  () =>
                  {
-                     var fly = CanFlyForMovement();
-                     log.Debug("TravelController: issuing navmesh move mode={Mode}", fly ? "flight" : "ground");
+                      log.Debug("TravelController: issuing navmesh move mode={Mode}", fly ? "flight" : "ground");
                      var issued = navmeshClient.SimpleMoveTo(destination, fly);
                     if (issued)
                     {
@@ -860,7 +821,7 @@ public sealed class TravelController : ITravelController, IDisposable
         }
     }
 
-    private async Task MonitorArrivalAsync(TravelJob job, CancellationToken token)
+    private async Task MonitorArrivalAsync(TravelJob job, bool fly, bool useFlightApproach, CancellationToken token)
     {
         var navmeshStopped = false;
         Vector3? lastPosition = null;
@@ -884,7 +845,7 @@ public sealed class TravelController : ITravelController, IDisposable
             var freshJob = CurrentJob;
             var fate = freshJob?.Selection.Fate ?? job.Selection.Fate;
 
-            if (job.ArrivalRadius >= DefaultArrivalRadius && fate.State == Dalamud.Game.ClientState.Fates.FateState.Running &&
+            if (useFlightApproach && fate.State == Dalamud.Game.ClientState.Fates.FateState.Running &&
                 DateTimeOffset.UtcNow >= nextLandingReplanAt &&
                 await IsConditionActiveAsync(ConditionFlag.Mounted, token).ConfigureAwait(false))
             {
@@ -898,13 +859,13 @@ public sealed class TravelController : ITravelController, IDisposable
                     lastPosition = null;
                     lastProgressAt = DateTimeOffset.UtcNow;
                     log.Debug("TravelController: retargeting mounted FATE travel to live-entity landing point {Point}", point);
-                    if (!await TryNavmeshMoveAsync(job.JobId, point, token).ConfigureAwait(false))
+                    if (!await TryNavmeshMoveAsync(job.JobId, point, fly, token).ConfigureAwait(false))
                         throw new TimeoutException("Failed to restart movement toward live-entity landing point");
                     continue;
                 }
             }
 
-            var arrivalTolerance = GetArrivalTolerance(job, fate);
+            var arrivalTolerance = GetArrivalTolerance(job, fate, useFlightApproach);
             var arrived = distance <= arrivalTolerance;
             if (lastPosition is not { } previous || Vector3.Distance(previous, playerPosition) >= 1.5f)
             {
@@ -931,7 +892,7 @@ public sealed class TravelController : ITravelController, IDisposable
                         var latest = currentJob!;
                         var player = objectTable.LocalPlayer;
                         if (player == null || condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51]) return false;
-                        return Vector3.Distance(player.Position, job.Selection.Destination) <= GetArrivalTolerance(job, fate);
+                        return Vector3.Distance(player.Position, job.Selection.Destination) <= GetArrivalTolerance(job, fate, useFlightApproach);
                     }, token).ConfigureAwait(false);
                     if (stillArrived) return;
                     throw new TimeoutException("Player left arrival radius while dismounting");
@@ -1044,10 +1005,13 @@ public sealed class TravelController : ITravelController, IDisposable
         return MathF.Min(distance, nearestAnchor);
     }
 
-    private static float GetArrivalTolerance(TravelJob job, ActiveFate fate)
-        => job.ArrivalRadius >= DefaultArrivalRadius && fate.State == Dalamud.Game.ClientState.Fates.FateState.Running
+    private static float GetArrivalTolerance(TravelJob job, ActiveFate fate, bool useFlightApproach)
+        => useFlightApproach && fate.State == Dalamud.Game.ClientState.Fates.FateState.Running
             ? FateApproachArrivalRadius
             : job.ArrivalRadius;
+
+    private static bool ShouldUseFlightApproach(bool strictDestination, bool fly)
+        => fly && !strictDestination;
 
     private static bool IsCommittedPhase(TravelPhase currentPhase) => currentPhase is TravelPhase.Teleporting
         or TravelPhase.Mounting

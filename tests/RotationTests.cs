@@ -180,7 +180,7 @@ static class RotationTests
 
     static void ChainTests()
     {
-        foreach (var scenario in new[] { "arrival", "manual", "death", "stop", "disable", "logout", "debug", "followup", "combat", "local", "filtered", "foreign", "collect", "cast", "auto-cleanup", "auto-teleport", "not-ready", "settling-cast", "zero-unrelated" })
+        foreach (var scenario in new[] { "arrival", "manual", "death", "stop", "disable", "logout", "debug", "followup", "combat", "travel-teleporting", "travel-moving", "travel-arriving", "travel-arrived", "travel-initializing", "local", "filtered", "foreign", "collect", "cast", "auto-cleanup", "auto-teleport", "not-ready", "settling-cast", "zero-unrelated" })
         {
             uint territory = 1, hp = 100; bool loggedIn = true, loaded = true, loading = false, pendingStop = false, combat = false, cast = false;
             var config = new Configuration { AutomatorEnabled = true, ZoneRotationEnabled = true, ZoneRotationTerritories = [1, 2, 3], ZoneRotationEmptyDelaySeconds = 0 };
@@ -193,7 +193,15 @@ static class RotationTests
                 ConditionFlag.BetweenAreas => loading, ConditionFlag.InCombat => combat, ConditionFlag.Casting => cast, _ => false
             } : Noop.Default(m));
             TravelJob? job = null;
-            var travel = Stub<ITravelController>((m,a) => m.Name == "get_CurrentJob" ? job : Noop.Default(m));
+            var travelPhase = TravelPhase.Idle;
+            var cancels = 0;
+            var travel = Stub<ITravelController>((m,a) =>
+            {
+                if (m.Name == "get_CurrentJob") return job;
+                if (m.Name == "get_Phase") return travelPhase;
+                if (m.Name == "Cancel") { cancels++; return null; }
+                return Noop.Default(m);
+            });
             int requests = 0, queries = 0;
             var executorState = TeleportState.Idle;
             var executor = Stub<ITeleportExecutor>((m,a) => {
@@ -208,7 +216,8 @@ static class RotationTests
             var rewards = Stub<IFateRewardTracker>((m,a) => m.Name == "get_PendingStop" ? pendingStop : m.Name == "get_CompletedCount" ? rewardCount : Noop.Default(m));
             ActiveFate[] fates = [];
             var repo = Stub<IFateRepository>((m,a) => { if (m.Name == "EnumerateActiveFates") { queries++; return fates; } return Noop.Default(m); });
-            var selector = Stub<IFateSelector>();
+            FateSelection? selectorSelection = null;
+            var selector = Stub<IFateSelector>((m,a) => m.Name == "SelectBest" ? selectorSelection : Noop.Default(m));
             var automaticTravel = new AutomaticTravelPolicy(config, client, objects, Stub<IFateTable>(), conditions);
             var handler = new RotatingZoneStateHandler(rotation, config, client, playerState, objects, conditions, repo, selector, follow, rewards, travel, Stub<IGameGui>(), log, automaticTravel);
             var boss = new BossModPresetManager(Stub<IDalamudPluginInterface>(), Stub<ICombatPluginRegistry>(), config, log, playerState);
@@ -244,6 +253,27 @@ static class RotationTests
             }
             if (scenario is "auto-cleanup" or "auto-teleport") job = new TravelJob(Guid.NewGuid(), default, TravelRequestKind.Automatic, DateTimeOffset.UtcNow, 12);
             if (scenario == "auto-teleport") { context.TransitionTo(AutomatorState.Travelling, "owned teleport", log); loading = true; }
+            if (scenario.StartsWith("travel-", StringComparison.Ordinal))
+            {
+                var travelFate = default(ActiveFate) with { FateId = 901, TerritoryId = 1, StartTimeEpoch = 77,
+                    State = Dalamud.Game.ClientState.Fates.FateState.Running };
+                var travelSelection = new FateSelection(travelFate, default, false, null, 0, "travel test", default);
+                fates = [travelFate];
+                selectorSelection = travelSelection;
+                job = new TravelJob(Guid.NewGuid(), travelSelection, TravelRequestKind.Automatic, DateTimeOffset.UtcNow, 12);
+                context.UpdateSelection(travelSelection, "travel test", log);
+                context.TransitionTo(AutomatorState.Travelling, "travel test", log);
+                travelPhase = scenario switch
+                {
+                    "travel-teleporting" => TravelPhase.Teleporting,
+                    "travel-moving" => TravelPhase.Moving,
+                    "travel-arriving" => TravelPhase.Arriving,
+                    "travel-arrived" => TravelPhase.Arrived,
+                    _ => TravelPhase.Initializing,
+                };
+                Set(chain, "observedTravelPhaseRaw", (int)travelPhase);
+                combat = true;
+            }
             if (scenario == "not-ready") loaded = false;
             chain.Tick();
             if (scenario == "arrival")
@@ -281,6 +311,16 @@ static class RotationTests
                 System.Threading.Thread.Sleep(1100);
                 chain.Tick();
                 Check(chain.State == AutomatorState.SelectingFate, "combat clearance resumes selection after aggro ends");
+                continue;
+            }
+            if (scenario.StartsWith("travel-", StringComparison.Ordinal))
+            {
+                if (scenario == "travel-arrived")
+                    Check(chain.State == AutomatorState.Travelling && cancels == 0, "arrived travel preserves handoff until travelling handler consumes arrival");
+                else if (scenario is "travel-teleporting" or "travel-moving" or "travel-arriving")
+                    Check(chain.State == AutomatorState.Travelling && cancels == 0, scenario + " preserves owned travel through incidental combat");
+                else
+                    Check(chain.State == AutomatorState.ClearingCombat && cancels > 0, "preflight travel still clears combat");
                 continue;
             }
             if (scenario is "followup" or "local" or "collect" or "cast" or "not-ready")

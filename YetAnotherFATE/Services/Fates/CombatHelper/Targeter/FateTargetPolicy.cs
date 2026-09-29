@@ -1,5 +1,6 @@
 using System;
 using Dalamud.Game.ClientState.Objects.Types;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using YetAnotherFATE.Data.Fates;
@@ -59,15 +60,22 @@ public static unsafe class FateTargetPolicy
         var character = (Character*)npc.Address;
         if (character->VirtualTable == null || character->FateId != fate.FateId)
             return "different FATE";
-        return character->IsHostile ? null : "not hostile";
+        var targetCategory = ActionManager.ClassifyTarget(character);
+        return IsEnemyTargetCategory(targetCategory) ? null : $"not enemy ({targetCategory})";
     }
+
+    public static bool IsEnemyTargetCategory(ActionManager.TargetCategory category)
+        => category == ActionManager.TargetCategory.Enemy;
 
     public static bool IsCombatNpcKind(string kind)
         => kind is "Combatant" or "BNpcPart";
 
     public static bool IsFateNpcIdentity(ulong gameObjectId, uint entityId, uint motivationNpc, uint objectiveNpc)
-        => (motivationNpc != 0 && (gameObjectId == motivationNpc || entityId == motivationNpc)) ||
-           (objectiveNpc != 0 && (gameObjectId == objectiveNpc || entityId == objectiveNpc));
+        => IsMatchingNpcIdentity(gameObjectId, entityId, motivationNpc) ||
+           IsMatchingNpcIdentity(gameObjectId, entityId, objectiveNpc);
+
+    private static bool IsMatchingNpcIdentity(ulong gameObjectId, uint entityId, uint npcId)
+        => npcId is not 0 and not 0xE0000000 && (gameObjectId == npcId || entityId == npcId);
 
     public static bool IsKnownFateNpcNameplate(uint nameplateIconId)
         => nameplateIconId is 60093 or 60732;

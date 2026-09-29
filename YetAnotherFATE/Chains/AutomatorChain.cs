@@ -18,6 +18,7 @@ using YetAnotherFATE.Services.Fates.CombatHelper.Engagement;
 using YetAnotherFATE.Services.Travel;
 using YetAnotherFATE.Services.Fates;
 using YetAnotherFATE.Services.Retainers;
+using YetAnotherFATE.Services.Companions;
 
 namespace YetAnotherFATE.Chains;
 
@@ -34,6 +35,7 @@ public sealed class AutomatorChain : IDisposable
     private readonly FateObstacleMapAssurance mapAssurance;
     private readonly AutomaticTravelPolicy automaticTravel;
     private readonly AutoRetainerHandoffController? autoRetainerHandoff;
+    private readonly IChocoboController? chocoboController;
     private uint territory;
     private readonly ITextAdvanceClient textAdvance;
     private readonly IFateRewardTracker rewardTracker;
@@ -63,6 +65,7 @@ public sealed class AutomatorChain : IDisposable
     public AutoRetainerHandoffPhase AutoRetainerHandoffPhase => autoRetainerHandoff?.Phase ?? AutoRetainerHandoffPhase.Idle;
     public string AutoRetainerHandoffStatus => autoRetainerHandoff?.Status ?? "Unavailable";
     public AutoRetainerReadinessSnapshot AutoRetainerReadiness => autoRetainerHandoff?.LastReadiness ?? default;
+    public string ChocoboStatus => chocoboController?.Status ?? "Unavailable";
 
     public AutomatorChain(
         ITravelController travelController,
@@ -83,7 +86,8 @@ public sealed class AutomatorChain : IDisposable
         IFateCombatHandler combatHandler,
         FateObstacleMapAssurance mapAssurance,
         AutomaticTravelPolicy automaticTravel,
-        AutoRetainerHandoffController? autoRetainerHandoff = null)
+        AutoRetainerHandoffController? autoRetainerHandoff = null,
+        IChocoboController? chocoboController = null)
     {
         this.travelController = travelController;
         this.log = log;
@@ -107,6 +111,7 @@ public sealed class AutomatorChain : IDisposable
         this.mapAssurance = mapAssurance;
         this.automaticTravel = automaticTravel;
         this.autoRetainerHandoff = autoRetainerHandoff;
+        this.chocoboController = chocoboController;
 
         travelController.PhaseChanged += OnTravelPhaseChanged;
     }
@@ -156,6 +161,7 @@ public sealed class AutomatorChain : IDisposable
         rotationSolverBridge.NotifyFateEnded();
         wrathComboBridge.NotifyAutomationStopped();
         combatHandler.Reset(reason);
+        chocoboController?.Reset();
         foreach (var handler in handlers)
             handler.Reset();
         context.Reset(log);
@@ -193,6 +199,7 @@ public sealed class AutomatorChain : IDisposable
         }
         if (territory != clientState.TerritoryType)
         {
+            chocoboController?.Reset();
             var previousTerritory = territory;
             territory = clientState.TerritoryType;
             var automaticTravelOwnsTransition = travelController.CurrentJob is { Kind: TravelRequestKind.Automatic } ||
@@ -237,6 +244,7 @@ public sealed class AutomatorChain : IDisposable
             rotationSolverBridge.NotifyFateEnded();
             wrathComboBridge.NotifyAutomationStopped();
             combatHandler.Reset("Player unconscious");
+            chocoboController?.Reset();
             obstacleMap.ClearTemporaryMap();
             mapAssurance.Reset();
             foreach (var stateHandler in handlers)
@@ -280,7 +288,7 @@ public sealed class AutomatorChain : IDisposable
             }
         }
 
-        if (condition[ConditionFlag.InCombat] && context.State is
+        if (condition[ConditionFlag.InCombat] && !CanContinueFateTravelThroughCombat() && context.State is
             (AutomatorState.SelectingFate or AutomatorState.Travelling or AutomatorState.ActivatingFate or
              AutomatorState.PostFate or AutomatorState.RotatingZone))
         {
@@ -294,6 +302,12 @@ public sealed class AutomatorChain : IDisposable
             context.TransitionTo(AutomatorState.ClearingCombat, "Combat started; clearing aggro before automation", log);
             return;
         }
+
+        if (context.State is AutomatorState.Participating or AutomatorState.ClearingCombat)
+            chocoboController?.TickDuringCombat();
+
+        if (context.State == AutomatorState.SelectingFate && chocoboController?.Tick() == true)
+            return;
 
         if (context.State == AutomatorState.SelectingFate && rotatingHandler?.TryOwnSelection(context) == true)
             return;
@@ -383,6 +397,7 @@ public sealed class AutomatorChain : IDisposable
         rotationSolverBridge.NotifyFateEnded();
         wrathComboBridge.NotifyAutomationStopped();
         combatHandler.Reset("Automator disabled");
+        chocoboController?.Reset();
     }
 
     private void OnTravelPhaseChanged(object? sender, TravelPhaseChangedEventArgs args)
@@ -390,6 +405,25 @@ public sealed class AutomatorChain : IDisposable
         Volatile.Write(ref observedTravelPhaseRaw, (int)args.Phase);
         Volatile.Write(ref observedTravelDetail, args.Detail);
     }
+
+    private bool CanContinueFateTravelThroughCombat()
+    {
+        if (context.State != AutomatorState.Travelling || context.CurrentSelection is not { } selection)
+            return false;
+
+        var phase = context.TravelPhase;
+        if (phase == TravelPhase.Arrived)
+            return true;
+        if (phase is not (TravelPhase.Teleporting or TravelPhase.Moving or TravelPhase.Arriving))
+            return false;
+
+        return travelController.CurrentJob is { Kind: TravelRequestKind.Automatic, Selection: { } jobSelection } &&
+            IsSameFateOccurrence(jobSelection.Fate, selection.Fate);
+    }
+
+    private static bool IsSameFateOccurrence(ActiveFate left, ActiveFate right)
+        => left.FateId == right.FateId && left.TerritoryId == right.TerritoryId &&
+           (left.StartTimeEpoch == 0 || right.StartTimeEpoch == 0 || left.StartTimeEpoch == right.StartTimeEpoch);
 
     public void Dispose()
     {

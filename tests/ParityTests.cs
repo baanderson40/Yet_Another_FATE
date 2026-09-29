@@ -41,18 +41,19 @@ static class Tests
             manager.ActivateRotationPreset();
             Check(active.SequenceEqual(new[] { "YAFate Farming" }), "provider activation");
             for (var i = 0; i < 100; i++) manager.ApplyFateTargetLimit();
-            Check(adds == 2, "unchanged target limit emits one call per owned strategy");
+            Check(adds == 3, "unchanged target limit emits one call per owned strategy");
             config.BossModMaxTargets = 9;
             manager.ApplyFateTargetLimit();
-            Check(adds == 3, "target limit changes once");
+            Check(adds == 4, "target limit changes once");
             config.CollectionPolicy = FateCollectionPolicy.KillOnly;
             manager.ApplyFateTargetLimit();
             Check(tracks["BossMod.Autorotation.MiscAI.AutoTarget/CollectFATE"] == "Disabled", "KillOnly target control");
             Check(tracks["BossMod.Autorotation.MiscAI.FateUtils/Collect"] == "Disabled", "KillOnly collect control");
-            Check(!tracks.Keys.Any(k => k.EndsWith("Hand-in") || k.EndsWith("Chocobo") || k.EndsWith("Sync")), "provider defaults preserved");
+            Check(tracks["BossMod.Autorotation.MiscAI.FateUtils/Chocobo"] == "Disabled", "YAF owns chocobo behavior");
+            Check(!tracks.Keys.Any(k => k.EndsWith("Hand-in") || k.EndsWith("Sync")), "provider defaults preserved");
             config.CollectionPolicy = FateCollectionPolicy.BossModDefault;
             manager.ApplyFateTargetLimit();
-            Check(clears == 1 && tracks.Count == 2, "runtime policy removes only AutoTarget collection override");
+            Check(clears == 1 && tracks.Count == 3, "runtime policy removes only AutoTarget collection override");
             rejectRestore = true;
             manager.ReleasePresets();
             Check(deletes == 0 && active[0] == "YAFate Farming", "failed restore retains owned preset");
@@ -80,7 +81,7 @@ static class Tests
             manager.DeactivateActivePreset();
             manager.ActivateRotationPreset();
             manager.ApplyFateTargetLimit();
-            Check(adds == 4, "already-absent transient tracks are reapplied after reactivation");
+            Check(adds == 6, "already-absent transient tracks are reapplied after reactivation");
         }
         {
             var ipc = new FakeIpc(); var mutated = false;

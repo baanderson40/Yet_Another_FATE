@@ -82,7 +82,7 @@ public sealed class BossModPresetManager : IDisposable
         }
 
         var path = Path.Combine(pluginInterface.AssemblyLocation.DirectoryName ?? string.Empty, "Data", "Combat", "BossMod", filename);
-        // Keep provider defaults (Hand-in, Chocobo) and explicit Sync=Enable intact.
+        // Keep provider defaults (Hand-in) and explicit Sync=Enable intact.
         // Collection is explicitly disabled in both YAF presets and at runtime.
         // Policy changes are reversible transient overrides, not mutations of the base definition.
         if (create.InvokeFunc(File.ReadAllText(path), false))
@@ -265,6 +265,8 @@ public sealed class BossModPresetManager : IDisposable
             // YAF owns collection targeting and interaction. Keep FateUtils collection disabled
             // even when the user allows collection, preventing BossMod from fighting YAF's target.
             success &= SetStrategy(FateUtils, "Collect", "Disabled");
+            // YAF owns companion summon/refresh and stance control.
+            success &= SetStrategy(FateUtils, "Chocobo", "Disabled");
             if (!success)
             {
                 strategyRetryAfter = DateTimeOffset.UtcNow.AddSeconds(5);

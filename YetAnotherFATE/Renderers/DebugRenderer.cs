@@ -129,6 +129,7 @@ public sealed class DebugRenderer
         ImGui.Text($"Teleport: {teleportExecutor.State} | Navmesh: {navmeshClient.IsAvailable} ({navmeshClient.Status})");
         ImGui.Text($"Activation: {fateActivationService.Status}");
         ImGui.TextWrapped($"Zone rotation: {automatorChain.ZoneRotationStatus}");
+        ImGui.TextWrapped($"Chocobo: {automatorChain.ChocoboStatus}");
         ImGui.Text($"Follow-up: {followUpTracker.Status}");
         ImGui.Text($"Rewards completed: {rewardTracker.CompletedCount}");
         if (rewardTracker.Remaining is { } remaining)

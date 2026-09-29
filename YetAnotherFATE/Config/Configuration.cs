@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using YetAnotherFATE.Data.Combat;
+using YetAnotherFATE.Data.Companions;
 using YetAnotherFATE.Data.Fates;
 using YetAnotherFATE.Data.Retainers;
 
@@ -35,6 +36,7 @@ public class Configuration : IPluginConfiguration
     public FateCollectionPolicy CollectionPolicy { get; set; } = FateCollectionPolicy.BossModDefault;
     public int BossModMaxTargets { get; set; } = 3;
     public bool BossModTargetsByRole { get; set; } = false;
+    public ChocoboStance ChocoboStance { get; set; } = ChocoboStance.Disabled;
 
     public bool TeleportEnabled { get; set; } = true;
     public float TeleportMountedRunSpeed { get; set; } = 6.0f;
@@ -90,6 +92,18 @@ public class Configuration : IPluginConfiguration
         if (Version < 3 || sortOrderChanged)
         {
             Version = Math.Max(Version, 3);
+            Save();
+        }
+        if (Version < 4)
+        {
+            if (!Enum.IsDefined(ChocoboStance))
+                ChocoboStance = ChocoboStance.Disabled;
+            Version = 4;
+            Save();
+        }
+        else if (!Enum.IsDefined(ChocoboStance))
+        {
+            ChocoboStance = ChocoboStance.Disabled;
             Save();
         }
     }

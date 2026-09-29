@@ -5,62 +5,121 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using YetAnotherFATE.Config;
 using YetAnotherFATE.Data.Combat;
+using YetAnotherFATE.Data.Companions;
 using YetAnotherFATE.Data.Fates;
 using YetAnotherFATE.Data.Retainers;
 using YetAnotherFATE.Services.Combat;
 using Dalamud.Plugin.Services;
-using Lumina.Excel.Sheets;
 using YetAnotherFATE.Services.Zone;
 
 namespace YetAnotherFATE.Windows;
 
 public class ConfigWindow : Window, IDisposable
 {
+    private enum ConfigSection
+    {
+        Display,
+        Combat,
+        Companion,
+        FateSelection,
+        Teleport,
+        ZoneRotation,
+        AutoRetainer,
+    }
+
     private const float ControlWidth = 150f;
     private readonly Configuration configuration;
     private readonly ICombatPluginRegistry combatPlugins;
     private readonly IZoneService zones;
-    private readonly IDataManager dataManager;
     private (uint Id, string Name)[]? rotationZones;
     private bool initialRefreshDone;
+    private ConfigSection selectedSection = ConfigSection.Display;
 
     // We give this window a constant ID using ###.
     // This allows for labels to be dynamic, like "{FPS Counter}fps###XYZ counter window",
     // and the window ID will always be "###XYZ counter window" for ImGui
-    public ConfigWindow(Configuration configuration, ICombatPluginRegistry combatPlugins, IZoneService zones, IDataManager dataManager) : base("Yet Another FATE Config")
+    public ConfigWindow(Configuration configuration, ICombatPluginRegistry combatPlugins, IZoneService zones) : base("Yet Another FATE Config")
     {
         Flags = ImGuiWindowFlags.NoCollapse;
 
-        Size = new Vector2(520, 600);
+        Size = new Vector2(760, 600);
         SizeCondition = ImGuiCond.FirstUseEver;
+        SizeConstraints = new WindowSizeConstraints
+        {
+            MinimumSize = new Vector2(700, 500),
+            MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
+        };
 
         this.configuration = configuration;
         this.combatPlugins = combatPlugins;
         this.zones = zones;
-        this.dataManager = dataManager;
     }
 
     public void Dispose() { }
 
     public override void Draw()
     {
-        DrawDisplaySection();
-        ImGui.Separator();
         EnsureProvidersDetected();
-        DrawCombatSection();
-        ImGui.NewLine();
-        ImGui.Separator();
-        DrawFateSection();
-        ImGui.NewLine();
-        ImGui.Separator();
-        ImGui.TextUnformatted("Teleport Heuristics");
-        ImGui.Separator();
-        DrawTeleportSection();
-        ImGui.Separator();
-        DrawZoneRotationSection();
-        ImGui.Separator();
-        DrawAutoRetainerSection();
-        ImGui.NewLine();
+        var available = ImGui.GetContentRegionAvail();
+        var navigationWidth = Math.Clamp(available.X * 0.22f, 150f, 220f);
+        var contentWidth = Math.Max(0f, available.X - navigationWidth - ImGui.GetStyle().ItemSpacing.X);
+
+        if (ImGui.BeginChild("##config-sections", new Vector2(navigationWidth, available.Y), true))
+        {
+            ImGui.TextUnformatted("Sections");
+            ImGui.Separator();
+            DrawSectionButton("FATE Display", ConfigSection.Display);
+            DrawSectionButton("Combat", ConfigSection.Combat);
+            DrawSectionButton("Companion", ConfigSection.Companion);
+            DrawSectionButton("FATE Selection", ConfigSection.FateSelection);
+            DrawSectionButton("Teleport", ConfigSection.Teleport);
+            DrawSectionButton("Zone Rotation", ConfigSection.ZoneRotation);
+            DrawSectionButton("AutoRetainer", ConfigSection.AutoRetainer);
+        }
+        ImGui.EndChild();
+
+        ImGui.SameLine();
+        if (ImGui.BeginChild("##config-content", new Vector2(contentWidth, available.Y), true))
+        {
+            switch (selectedSection)
+            {
+                case ConfigSection.Display:
+                    DrawDisplaySection();
+                    break;
+                case ConfigSection.Combat:
+                    DrawCombatSection();
+                    break;
+                case ConfigSection.Companion:
+                    DrawCompanionSection();
+                    break;
+                case ConfigSection.FateSelection:
+                    DrawFateSection();
+                    break;
+                case ConfigSection.Teleport:
+                    DrawTeleportSection();
+                    break;
+                case ConfigSection.ZoneRotation:
+                    DrawZoneRotationSection();
+                    break;
+                case ConfigSection.AutoRetainer:
+                    DrawAutoRetainerSection();
+                    break;
+            }
+        }
+        ImGui.EndChild();
+    }
+
+    private void DrawSectionButton(string label, ConfigSection section)
+    {
+        var selected = selectedSection == section;
+        if (selected)
+            ImGui.PushStyleColor(ImGuiCol.Button, ImGui.GetStyle().Colors[(int)ImGuiCol.Header]);
+
+        if (ImGui.Button($"{label}##config-section-{section}", new Vector2(-1f, 0f)))
+            selectedSection = section;
+
+        if (selected)
+            ImGui.PopStyleColor();
     }
 
     private void DrawZoneRotationSection()
@@ -235,6 +294,30 @@ public class ConfigWindow : Window, IDisposable
 
         ImGui.NewLine();
 
+    }
+
+    private void DrawCompanionSection()
+    {
+        ImGui.TextUnformatted("Chocobo Companion");
+        ImGui.Separator();
+        ImGui.SetNextItemWidth(ControlWidth);
+        if (ImGui.BeginCombo("Combat stance", configuration.ChocoboStance.ToString()))
+        {
+            foreach (var stance in Enum.GetValues<ChocoboStance>())
+            {
+                var selected = stance == configuration.ChocoboStance;
+                if (ImGui.Selectable(stance.ToString(), selected) && !selected)
+                {
+                    configuration.ChocoboStance = stance;
+                    configuration.Save();
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
+        ImGui.TextWrapped("YAF uses Gysahl Greens already in normal inventory and refreshes the companion below three minutes between FATEs. If the companion is defeated during combat, YAF resummons it and restores the selected stance without pausing the combat provider. It does not purchase greens.");
+        ImGui.TextWrapped("Disabled leaves chocobo summon and stance control off.");
     }
 
     private void EnsureProvidersDetected()
@@ -423,6 +506,8 @@ public class ConfigWindow : Window, IDisposable
 
     private void DrawTeleportSection()
     {
+        ImGui.TextUnformatted("Teleport Heuristics");
+        ImGui.Separator();
         var enabled = configuration.TeleportEnabled;
         if (ImGui.Checkbox("Enable Teleport Advisor", ref enabled))
         {

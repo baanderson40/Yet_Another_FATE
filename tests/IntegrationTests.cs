@@ -18,6 +18,7 @@ using YetAnotherFATE.Modules.Automator.Handlers;
 using YetAnotherFATE.Data.Automator;
 using YetAnotherFATE.Services.Combat;
 using YetAnotherFATE.Services.Combat.BossMod;
+using YetAnotherFATE.Services.Companions;
 using YetAnotherFATE.Services.Combat.RotationSolver;
 using YetAnotherFATE.Services.Combat.Wrath;
 using YetAnotherFATE.Services.Fates.CombatHelper.Engagement;
@@ -115,7 +116,15 @@ class Program
         var fateNpcIdentity = typeof(FateTargetPolicy).GetMethod("IsFateNpcIdentity", BindingFlags.Static | BindingFlags.Public)!;
         Check((bool)fateNpcIdentity.Invoke(null, [77UL, 12U, 77U, 99U])!, "motivation NPC identity is excluded from FATE targets");
         Check((bool)fateNpcIdentity.Invoke(null, [77UL, 12U, 99U, 12U])!, "objective NPC entity identity is excluded from FATE targets");
+        Check(!(bool)fateNpcIdentity.Invoke(null, [77UL, 12U, 0xE0000000U, 0U])!, "sentinel NPC identity is ignored");
         Check(!(bool)fateNpcIdentity.Invoke(null, [77UL, 12U, 99U, 98U])!, "unrelated NPC identity remains eligible for further filtering");
+        var enemyCategory = typeof(FateTargetPolicy).GetMethod("IsEnemyTargetCategory", BindingFlags.Static | BindingFlags.Public)!;
+        Check((bool)enemyCategory.Invoke(null, [FFXIVClientStructs.FFXIV.Client.Game.ActionManager.TargetCategory.Enemy])!, "enemy action target category accepted");
+        Check(!(bool)enemyCategory.Invoke(null, [FFXIVClientStructs.FFXIV.Client.Game.ActionManager.TargetCategory.Friendly])!, "friendly action target category rejected");
+        var flightApproach = typeof(TravelController).GetMethod("ShouldUseFlightApproach", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Check(!(bool)flightApproach.Invoke(null, [false, false])!, "ground travel uses direct FATE destination");
+        Check(!(bool)flightApproach.Invoke(null, [true, true])!, "strict destination uses direct target in flight mode");
+        Check((bool)flightApproach.Invoke(null, [false, true])!, "normal flight travel uses landing approach");
         var combatKind = typeof(FateTargetPolicy).GetMethod("IsCombatNpcKind", BindingFlags.Static | BindingFlags.Public)!;
         Check((bool)combatKind.Invoke(null, ["Combatant"])! && (bool)combatKind.Invoke(null, ["BNpcPart"])!, "combat BattleNpc kinds accepted");
         Check(!(bool)combatKind.Invoke(null, ["Pet"])! && !(bool)combatKind.Invoke(null, ["EventNpc"])!, "non-combat BattleNpc kinds rejected");
@@ -127,11 +136,14 @@ class Program
         Check(FateTargetPolicy.GetForlornPriority(1) == 0, "ordinary NameId has no Forlorn priority");
         var pi = DispatchProxy.Create<IDalamudPluginInterface, Noop>();
         var migrated = new Configuration { FateMinTimeRemainingSeconds = 240 };
-        migrated.Initialize(pi); Check(migrated.Version == 3 && migrated.FateMinTimeRemainingSeconds == 120, "old erroneous default migrated");
+         migrated.Initialize(pi); Check(migrated.Version == 4 && migrated.FateMinTimeRemainingSeconds == 120 && migrated.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "old erroneous default migrated");
         var custom = new Configuration { FateMinTimeRemainingSeconds = 75 };
         custom.Initialize(pi); Check(custom.FateMinTimeRemainingSeconds == 75, "custom minimum retained");
-        var explicit240 = new Configuration { Version = 1, FateMinTimeRemainingSeconds = 240 };
-        explicit240.Initialize(pi); Check(explicit240.FateMinTimeRemainingSeconds == 240, "versioned choice retained");
+         var explicit240 = new Configuration { Version = 1, FateMinTimeRemainingSeconds = 240 };
+         explicit240.Initialize(pi); Check(explicit240.FateMinTimeRemainingSeconds == 240, "versioned choice retained");
+         var invalidCompanion = new Configuration { Version = 3, ChocoboStance = (YetAnotherFATE.Data.Companions.ChocoboStance)99 };
+         invalidCompanion.Initialize(pi); Check(invalidCompanion.Version == 4 && invalidCompanion.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "invalid chocobo stance normalized");
+         TestChocoboController(log);
         var retainerReady = typeof(AutoRetainerClient).GetMethod("IsRetainerReady", BindingFlags.Static | BindingFlags.NonPublic)!;
         Check((bool)retainerReady.Invoke(null, [new long[] { 30, 45 }, 30L, true, 60L])!, "all retainers honor advance threshold");
         Check(!(bool)retainerReady.Invoke(null, [new long[] { 30, 90 }, 30L, true, 60L])!, "wait-for-all blocks on late retainer");
@@ -154,7 +166,7 @@ class Program
             ]
         };
         duplicatedPriorities.Initialize(pi);
-        Check(duplicatedPriorities.Version == 3 && duplicatedPriorities.FateSortOrder.Count == 2
+         Check(duplicatedPriorities.Version == 4 && duplicatedPriorities.FateSortOrder.Count == 2
             && duplicatedPriorities.FateSortOrder[0].Criteria == FateSortCriteria.Distance
             && duplicatedPriorities.FateSortOrder[0].Descending
             && duplicatedPriorities.FateSortOrder[1].Criteria == FateSortCriteria.Level,
@@ -604,6 +616,58 @@ class Program
         ((Noop)(object)value).Handler = handler;
         return value;
     }
+
+    static void TestChocoboController(IPluginLog log)
+    {
+        var disabledConfig = new Configuration();
+        var disabledApi = new FakeChocoboApi(new(true, false, false, false, 0, 0, 1));
+        var disabled = new ChocoboController(disabledConfig, disabledApi, log);
+        Check(!disabled.Tick() && disabledApi.GreensUses == 0, "disabled chocobo controller is idle");
+
+        var summonConfig = new Configuration { ChocoboStance = YetAnotherFATE.Data.Companions.ChocoboStance.Healer };
+        var summonApi = new FakeChocoboApi(new(true, false, false, false, 0, 0, 1));
+         var summon = new ChocoboController(summonConfig, summonApi, log);
+         Check(summon.Tick() && summonApi.GreensUses == 1, "chocobo summon dispatches once");
+         System.Threading.Thread.Sleep(300);
+         Check(summon.Tick() && summonApi.StanceUses == 1, "summon confirmation precedes stance dispatch");
+         System.Threading.Thread.Sleep(300);
+         Check(!summon.Tick(), "summon and stance confirmation completes before selection resumes");
+
+         var refreshApi = new FakeChocoboApi(new(true, true, false, false, 100, 7, 1));
+         var refresh = new ChocoboController(summonConfig, refreshApi, log);
+         Check(refresh.Tick() && refreshApi.GreensUses == 1, "low timer refreshes chocobo");
+         Check(refresh.Tick() && refreshApi.GreensUses == 1, "refresh remains pending without duplicate item use");
+         System.Threading.Thread.Sleep(300);
+         Check(!refresh.Tick() && refreshApi.GreensUses == 1, "refresh confirmation prevents repeated item use");
+
+         var deadApi = new FakeChocoboApi(new(true, true, false, false, 900, 7, 1, 0, 100));
+         var dead = new ChocoboController(summonConfig, deadApi, log);
+         dead.TickDuringCombat();
+         Check(deadApi.GreensUses == 1, "dead chocobo resummons during combat");
+         System.Threading.Thread.Sleep(300);
+         dead.TickDuringCombat();
+         Check(deadApi.StanceUses == 0, "combat resummon keeps existing stance");
+
+         var liveLowTimerApi = new FakeChocoboApi(new(true, true, false, false, 100, 7, 1, 100, 100));
+         var liveLowTimer = new ChocoboController(summonConfig, liveLowTimerApi, log);
+         liveLowTimer.TickDuringCombat();
+         Check(liveLowTimerApi.GreensUses == 0, "combat does not perform routine timer refresh");
+
+         var mountedCombatApi = new FakeChocoboApi(new(true, false, false, true, 0, 0, 1));
+         var mountedCombat = new ChocoboController(summonConfig, mountedCombatApi, log);
+         mountedCombat.TickDuringCombat();
+         Check(mountedCombatApi.Dismounts == 0 && mountedCombatApi.GreensUses == 0, "combat summon does not force dismount");
+
+         var stanceApi = new FakeChocoboApi(new(true, true, false, false, 900, 4, 0));
+         var stance = new ChocoboController(summonConfig, stanceApi, log);
+         Check(stance.Tick() && stanceApi.StanceUses == 1, "wrong chocobo stance dispatches");
+         System.Threading.Thread.Sleep(300);
+         Check(!stance.Tick() && stanceApi.Snapshot.ActiveCommand == (byte)YetAnotherFATE.Data.Companions.ChocoboStance.Healer, "chocobo stance confirmation completes");
+
+        var mountedApi = new FakeChocoboApi(new(true, false, false, true, 0, 0, 0));
+        var mounted = new ChocoboController(summonConfig, mountedApi, log);
+        Check(mounted.Tick() && mountedApi.Dismounts == 1, "mounted player dismounts before chocobo action");
+    }
 }
 public class Noop : DispatchProxy
 {
@@ -618,4 +682,42 @@ class ProbeHandler : IAutomatorStateHandler
     public bool CanHandle(AutomatorState state) => true;
     public AutomatorStateHandlerResult Tick(AutomatorContext context) => AutomatorStateHandlerResult.Wait("test probe");
     public void Reset() => Resets++;
+}
+
+sealed class FakeChocoboApi : IChocoboCompanionApi
+{
+    public ChocoboSnapshot Snapshot;
+    public int GreensUses;
+    public int StanceUses;
+    public int Dismounts;
+
+    public FakeChocoboApi(ChocoboSnapshot snapshot) => Snapshot = snapshot;
+
+    public ChocoboSnapshot Read() => Snapshot;
+
+    public ChocoboActionResult TryUseGreens()
+    {
+        GreensUses++;
+        Snapshot = Snapshot with
+        {
+            IsSpawned = true,
+            TimeLeftSeconds = 900,
+            CurrentHealth = Snapshot.MaxHealth == 0 ? 100 : Snapshot.MaxHealth,
+        };
+        return ChocoboActionResult.Issued;
+    }
+
+    public ChocoboActionResult TrySetStance(YetAnotherFATE.Data.Companions.ChocoboStance stance)
+    {
+        StanceUses++;
+        Snapshot = Snapshot with { ActiveCommand = (byte)stance };
+        return ChocoboActionResult.Issued;
+    }
+
+    public ChocoboActionResult TryDismount()
+    {
+        Dismounts++;
+        Snapshot = Snapshot with { IsMounted = false };
+        return ChocoboActionResult.Issued;
+    }
 }

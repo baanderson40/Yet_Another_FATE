@@ -27,6 +27,7 @@ using YetAnotherFATE.Services.Combat.RotationSolver;
 using YetAnotherFATE.Services.Combat.Wrath;
 using YetAnotherFATE.Services.Combat.BossMod;
 using YetAnotherFATE.Services.Retainers;
+using YetAnotherFATE.Services.Companions;
 
 namespace YetAnotherFATE;
 
@@ -121,6 +122,8 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton<UxModule>();
         services.AddSingleton<AutomatorModule>();
         services.AddSingleton<AutomatorChain>();
+        services.AddSingleton<IChocoboCompanionApi, ChocoboCompanionApi>();
+        services.AddSingleton<IChocoboController, ChocoboController>();
         services.AddSingleton<IAutoRetainerClient, AutoRetainerClient>();
         services.AddSingleton<ILifestreamCharacterClient, LifestreamCharacterClient>();
         services.AddSingleton<TerritoryReturnRoute>();
