@@ -18,13 +18,13 @@ public class ConfigWindow : Window, IDisposable
 {
     private enum ConfigSection
     {
-        Display,
+        AutoRetainer,
         Combat,
         Companion,
+        Display,
         FateSelection,
         Teleport,
         ZoneRotation,
-        AutoRetainer,
     }
 
     private const float ControlWidth = 150f;
@@ -68,13 +68,13 @@ public class ConfigWindow : Window, IDisposable
         {
             ImGui.TextUnformatted("Sections");
             ImGui.Separator();
-            DrawSectionButton("FATE Display", ConfigSection.Display);
+            DrawSectionButton("AutoRetainer", ConfigSection.AutoRetainer);
             DrawSectionButton("Combat", ConfigSection.Combat);
             DrawSectionButton("Companion", ConfigSection.Companion);
+            DrawSectionButton("FATE Display", ConfigSection.Display);
             DrawSectionButton("FATE Selection", ConfigSection.FateSelection);
             DrawSectionButton("Teleport", ConfigSection.Teleport);
             DrawSectionButton("Zone Rotation", ConfigSection.ZoneRotation);
-            DrawSectionButton("AutoRetainer", ConfigSection.AutoRetainer);
         }
         ImGui.EndChild();
 
@@ -83,14 +83,17 @@ public class ConfigWindow : Window, IDisposable
         {
             switch (selectedSection)
             {
-                case ConfigSection.Display:
-                    DrawDisplaySection();
+                case ConfigSection.AutoRetainer:
+                    DrawAutoRetainerSection();
                     break;
                 case ConfigSection.Combat:
                     DrawCombatSection();
                     break;
                 case ConfigSection.Companion:
                     DrawCompanionSection();
+                    break;
+                case ConfigSection.Display:
+                    DrawDisplaySection();
                     break;
                 case ConfigSection.FateSelection:
                     DrawFateSection();
@@ -100,9 +103,6 @@ public class ConfigWindow : Window, IDisposable
                     break;
                 case ConfigSection.ZoneRotation:
                     DrawZoneRotationSection();
-                    break;
-                case ConfigSection.AutoRetainer:
-                    DrawAutoRetainerSection();
                     break;
             }
         }
