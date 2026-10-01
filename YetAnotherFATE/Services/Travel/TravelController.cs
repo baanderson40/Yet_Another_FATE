@@ -730,7 +730,7 @@ public sealed class TravelController : ITravelController, IDisposable
         DateTimeOffset clearSince = DateTimeOffset.MinValue;
         while (!token.IsCancellationRequested)
         {
-            if (condition[ConditionFlag.InCombat])
+            if (await IsConditionActiveAsync(ConditionFlag.InCombat, token).ConfigureAwait(false))
             {
                 clearSince = DateTimeOffset.MinValue;
             }

@@ -28,6 +28,7 @@ using Dalamud.Game.ClientState.Conditions;
 using YetAnotherFATE.Modules.Automator.Handlers.ParticipatingInFate.Handlers;
 using YetAnotherFATE.Services.Fates.CombatHelper.LevelSync;
 using YetAnotherFATE.Services.Zone;
+using YetAnotherFATE.Services.Movement;
 using YetAnotherFATE.Data.Zone;
 using System.Numerics;
 
@@ -125,6 +126,7 @@ class Program
         Check(!(bool)flightApproach.Invoke(null, [false, false])!, "ground travel uses direct FATE destination");
         Check(!(bool)flightApproach.Invoke(null, [true, true])!, "strict destination uses direct target in flight mode");
         Check((bool)flightApproach.Invoke(null, [false, true])!, "normal flight travel uses landing approach");
+        TestTravelConditionDispatch(log);
         var combatKind = typeof(FateTargetPolicy).GetMethod("IsCombatNpcKind", BindingFlags.Static | BindingFlags.Public)!;
         Check((bool)combatKind.Invoke(null, ["Combatant"])! && (bool)combatKind.Invoke(null, ["BNpcPart"])!, "combat BattleNpc kinds accepted");
         Check(!(bool)combatKind.Invoke(null, ["Pet"])! && !(bool)combatKind.Invoke(null, ["EventNpc"])!, "non-combat BattleNpc kinds rejected");
@@ -667,6 +669,75 @@ class Program
         var mountedApi = new FakeChocoboApi(new(true, false, false, true, 0, 0, 0));
         var mounted = new ChocoboController(summonConfig, mountedApi, log);
         Check(mounted.Tick() && mountedApi.Dismounts == 1, "mounted player dismounts before chocobo action");
+    }
+
+    static void TestTravelConditionDispatch(IPluginLog log)
+    {
+        var insideFrameworkDispatch = false;
+        var conditionReads = 0;
+        var outsideFrameworkReads = 0;
+        using var cancellation = new System.Threading.CancellationTokenSource();
+        var condition = Stub<ICondition>((method, args) =>
+        {
+            if (method.Name != "get_Item")
+                return Noop.Default(method);
+
+            conditionReads++;
+            if (!insideFrameworkDispatch)
+                outsideFrameworkReads++;
+            cancellation.Cancel();
+            return true;
+        });
+        var framework = Stub<IFramework>((method, args) =>
+        {
+            if (method.Name != "RunOnFrameworkThread")
+                return Noop.Default(method);
+
+            var callback = (Delegate)args![0]!;
+            insideFrameworkDispatch = true;
+            try
+            {
+                if (method.ReturnType == typeof(Task))
+                {
+                    callback.DynamicInvoke();
+                    return Task.CompletedTask;
+                }
+
+                return Task.FromResult((bool)callback.DynamicInvoke()!);
+            }
+            finally
+            {
+                insideFrameworkDispatch = false;
+            }
+        });
+        var client = Stub<IClientState>();
+        var objects = Stub<IObjectTable>();
+        var automaticTravel = new AutomaticTravelPolicy(new Configuration(), client, objects, Stub<IFateTable>(), condition);
+        using var travel = new TravelController(
+            Stub<ITeleportExecutor>(),
+            Stub<INavmeshClient>(),
+            client,
+            condition,
+            objects,
+            framework,
+            Stub<IGameGui>(),
+            Stub<IBossModObstacleMap>(),
+            automaticTravel,
+            log);
+        var waitForCombatClear = typeof(TravelController).GetMethod("WaitForCombatClearAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var task = (Task<bool>)waitForCombatClear.Invoke(travel, [cancellation.Token])!;
+        var cancelled = false;
+        try
+        {
+            _ = task.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+
+        Check(cancelled, "travel combat wait cancels through framework dispatch");
+        Check(conditionReads > 0 && outsideFrameworkReads == 0, "travel combat condition reads stay on framework thread");
     }
 }
 public class Noop : DispatchProxy
