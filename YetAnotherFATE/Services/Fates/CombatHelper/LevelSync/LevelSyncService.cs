@@ -1,7 +1,4 @@
 using System;
-using Dalamud.Game.ClientState.Conditions;
-using Dalamud.Plugin.Services;
-using FFXIVClientStructs.FFXIV.Client.Game.Fate;
 using YetAnotherFATE.Data.Fates;
 
 namespace YetAnotherFATE.Services.Fates.CombatHelper.LevelSync;
@@ -9,101 +6,133 @@ namespace YetAnotherFATE.Services.Fates.CombatHelper.LevelSync;
 public sealed class LevelSyncService : ILevelSyncService
 {
     private static readonly TimeSpan AttemptCooldown = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ConfirmationTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan TimeoutBackoff = TimeSpan.FromSeconds(10);
 
-    private const int LevelGapThreshold = 5;
+    private readonly ILevelSyncGameApi gameApi;
+    private readonly Func<DateTimeOffset> clock;
+    private DateTimeOffset nextAttemptAt;
+    private DateTimeOffset lastRequestAt;
+    private (uint Territory, uint FateId, int StartTime, uint ClassJob)? trackedSelection;
 
-    private readonly IPlayerState playerState;
-    private readonly ICondition condition;
-    private readonly IPluginLog log;
-    private DateTimeOffset nextAttemptAt = DateTimeOffset.MinValue;
-
-    public LevelSyncService(
-        IPlayerState playerState,
-        ICondition condition,
-        IPluginLog log)
+    public LevelSyncService(ILevelSyncGameApi gameApi)
+        : this(gameApi, () => DateTimeOffset.UtcNow)
     {
-        this.playerState = playerState;
-        this.condition = condition;
-        this.log = log;
     }
+
+    internal LevelSyncService(ILevelSyncGameApi gameApi, Func<DateTimeOffset> clock)
+    {
+        this.gameApi = gameApi;
+        this.clock = clock;
+    }
+
+    public string Status { get; private set; } = "Idle";
 
     public bool EnsureSynced(FateSelection selection)
     {
-        if (!NeedsSync(selection))
+        var snapshot = gameApi.Read();
+        var key = (selection.Fate.TerritoryId, selection.Fate.FateId, selection.Fate.StartTimeEpoch, snapshot.ClassJobId);
+        if (trackedSelection != key)
         {
+            trackedSelection = key;
+            nextAttemptAt = DateTimeOffset.MinValue;
+            lastRequestAt = DateTimeOffset.MinValue;
+        }
+
+        if (!snapshot.PlayerReady)
+        {
+            Status = "Waiting for player";
+            return false;
+        }
+        if (!snapshot.NativeAvailable)
+        {
+            Status = "FateManager unavailable";
+            return false;
+        }
+        if (snapshot.TerritoryId != selection.Fate.TerritoryId || snapshot.CurrentFateId != selection.Fate.FateId ||
+            snapshot.CurrentFateId == 0 ||
+            (snapshot.CurrentFateStartTimeEpoch != 0 && selection.Fate.StartTimeEpoch != 0 &&
+             snapshot.CurrentFateStartTimeEpoch != selection.Fate.StartTimeEpoch))
+        {
+            Status = $"Waiting for selected FATE registration (selected #{selection.Fate.FateId}, native #{snapshot.CurrentFateId})";
+            return false;
+        }
+
+        if (snapshot.IsSyncedToCurrentFate)
+        {
+            Status = $"Synced to FATE #{snapshot.CurrentFateId} (effective {snapshot.EffectiveLevel})";
+            lastRequestAt = DateTimeOffset.MinValue;
             return true;
         }
 
-        if (!CanAttemptSync())
+        var maxLevel = snapshot.CurrentFateMaxLevel > 0
+            ? snapshot.CurrentFateMaxLevel
+            : selection.Fate.MaxLevel;
+        if (maxLevel <= 0 || snapshot.CurrentFateLevel > maxLevel)
         {
+            Status = $"FATE #{snapshot.CurrentFateId} level cap unavailable";
             return false;
         }
 
-        TrySendLevelSync(selection);
-        return false;
-    }
-
-    private bool NeedsSync(FateSelection selection)
-    {
-        if (!playerState.IsLoaded)
+        if (snapshot.PlayerLevel <= maxLevel)
         {
+            Status = $"No sync required (player {snapshot.PlayerLevel}, FATE max {maxLevel})";
+            lastRequestAt = DateTimeOffset.MinValue;
+            return true;
+        }
+
+        var now = clock();
+        if (lastRequestAt != DateTimeOffset.MinValue && now - lastRequestAt >= ConfirmationTimeout)
+        {
+            Status = $"Sync confirmation timed out for FATE #{snapshot.CurrentFateId}";
+            lastRequestAt = DateTimeOffset.MinValue;
+            nextAttemptAt = now + TimeoutBackoff;
+        }
+        if (now < nextAttemptAt)
+        {
+            if (lastRequestAt != DateTimeOffset.MinValue)
+                Status = $"Waiting for sync confirmation ({Math.Max(0, (ConfirmationTimeout - (now - lastRequestAt)).TotalSeconds):F0}s)";
             return false;
         }
 
-        if (playerState.IsLevelSynced)
+        var result = gameApi.TryRequestSync(selection);
+        switch (result)
         {
-            return false;
-        }
-
-        var playerLevel = playerState.Level;
-        var fateLevel = selection.Fate.Level;
-        return playerLevel >= fateLevel + LevelGapThreshold;
-    }
-
-    private bool CanAttemptSync()
-    {
-        if (DateTimeOffset.UtcNow < nextAttemptAt)
-        {
-            return false;
-        }
-
-        if (condition[ConditionFlag.BetweenAreas])
-        {
-            return false;
-        }
-
-        return true;
-    }
-
-    private void TrySendLevelSync(FateSelection selection)
-    {
-        try
-        {
-            unsafe
-            {
-                var fateManager = FateManager.Instance();
-                if (fateManager == null)
+            case LevelSyncRequestResult.Requested:
+                lastRequestAt = now;
+                nextAttemptAt = now + ConfirmationTimeout;
+                Status = $"Sync requested for FATE #{snapshot.CurrentFateId}; waiting for native confirmation";
+                return false;
+            case LevelSyncRequestResult.AlreadyReady:
+                var after = gameApi.Read();
+                if (after.IsSyncedToCurrentFate || after.PlayerLevel <= maxLevel)
                 {
-                    log.Debug("LevelSyncService: FateManager unavailable; cannot level sync right now.");
-                    return;
+                    Status = after.IsSyncedToCurrentFate ? $"Synced to FATE #{after.CurrentFateId}" : "No sync required";
+                    return true;
                 }
+                Status = "Sync request already satisfied; waiting for native confirmation";
+                nextAttemptAt = now + AttemptCooldown;
+                return false;
+            case LevelSyncRequestResult.WrongCurrentFate:
+                Status = $"Waiting for selected FATE #{selection.Fate.FateId} to become native current FATE";
+                nextAttemptAt = now + AttemptCooldown;
+                return false;
+            case LevelSyncRequestResult.NotReady:
+                Status = "Waiting for safe sync state";
+                nextAttemptAt = now + AttemptCooldown;
+                return false;
+            default:
+                Status = $"Sync unavailable ({result})";
+                nextAttemptAt = now + AttemptCooldown;
+                return false;
+        }
+    }
 
-                fateManager->LevelSync();
-            }
-
-            log.Debug(
-                "LevelSyncService: issued level sync for fate #{FateId} (player level {PlayerLevel} > fate level {FateLevel})",
-                selection.Fate.FateId,
-                playerState.Level,
-                selection.Fate.Level);
-        }
-        catch (Exception ex)
-        {
-            log.Error(ex, "LevelSyncService: LevelSync call failed");
-        }
-        finally
-        {
-            nextAttemptAt = DateTimeOffset.UtcNow + AttemptCooldown;
-        }
+    public void Reset()
+    {
+        trackedSelection = null;
+        nextAttemptAt = DateTimeOffset.MinValue;
+        lastRequestAt = DateTimeOffset.MinValue;
+        Status = "Idle";
     }
 }

@@ -131,6 +131,15 @@ public class ConfigWindow : Window, IDisposable
             configuration.ZoneRotationEnabled = enabled;
             configuration.Save();
         }
+        var returnIdle = configuration.ReturnToNearestAetheryteWhenIdle;
+        ImGui.BeginDisabled(enabled);
+        if (ImGui.Checkbox("Return to nearest aetheryte when idle", ref returnIdle))
+        {
+            configuration.ReturnToNearestAetheryteWhenIdle = returnIdle;
+            configuration.Save();
+        }
+        ImGui.EndDisabled();
+        ImGui.TextWrapped("When zone rotation is disabled and no eligible FATE remains, teleport to the nearest unlocked main aetheryte after the shared no-FATE delay.");
         ImGui.TextWrapped("Only the current zone's FATEs are visible. Travel visits the ordered list; it does not scan remote zones. Teleport enable and max gil cost apply. Twist of Fate keeps you in the current zone.");
         var fallback = configuration.ZoneRotationSameExpansionFallback;
         if (ImGui.Checkbox("Use same-expansion overworld zones when list is empty", ref fallback))
@@ -144,7 +153,7 @@ public class ConfigWindow : Window, IDisposable
             configuration.ZoneRotationWhenNoEligibleFates = noEligible;
             configuration.Save();
         }
-        DrawIntegerSetting("Empty-zone delay (s)", configuration.ZoneRotationEmptyDelaySeconds, 0, 3600, v => configuration.ZoneRotationEmptyDelaySeconds = v);
+        DrawIntegerSetting("No-FATE delay (s)", configuration.ZoneRotationEmptyDelaySeconds, 0, 3600, v => configuration.ZoneRotationEmptyDelaySeconds = v);
         DrawIntegerSetting("Arrival scan settle (s)", configuration.ZoneRotationArrivalSettleSeconds, 5, 120, v => configuration.ZoneRotationArrivalSettleSeconds = v);
         DrawIntegerSetting("Full-circuit backoff (s)", configuration.ZoneRotationCircuitBackoffSeconds, 1, 3600, v => configuration.ZoneRotationCircuitBackoffSeconds = v);
         configuration.ZoneRotationTerritories ??= new();
@@ -220,7 +229,7 @@ public class ConfigWindow : Window, IDisposable
             value => configuration.AutoRetainerReadinessIntervalSeconds = value);
         DrawIntegerSetting("Retry cooldown (s)", configuration.AutoRetainerRetryCooldownSeconds, 30, 1800,
             value => configuration.AutoRetainerRetryCooldownSeconds = value);
-        ImGui.TextWrapped("AutoRetainer owns character switching and retainer routing. YAF resumes after returning to the original character.");
+        ImGui.TextWrapped("YAF returns to the nearest unlocked main aetheryte before every YAF-started AutoRetainer pass. Teleport, gil, Twist of Fate, and safety restrictions can hold the handoff. YAF resumes after returning to the original character.");
     }
 
     private void DrawDisplaySection()

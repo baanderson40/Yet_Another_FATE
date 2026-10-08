@@ -11,4 +11,5 @@ public enum AutoRetainerHandoffPhase
     ReturningOriginalTerritory,
     Resuming,
     Failed,
+    PreparingSafeLocation = 9,
 }

@@ -267,6 +267,8 @@ public sealed class BossModPresetManager : IDisposable
             success &= SetStrategy(FateUtils, "Collect", "Disabled");
             // YAF owns companion summon/refresh and stance control.
             success &= SetStrategy(FateUtils, "Chocobo", "Disabled");
+            // YAF confirms the selected-FATE sync state before enabling this preset.
+            success &= SetStrategy(FateUtils, "Sync", "None");
             if (!success)
             {
                 strategyRetryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
@@ -281,6 +283,33 @@ public sealed class BossModPresetManager : IDisposable
         {
             strategyRetryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
             log.Debug(ex, "BossModPresetManager: transient strategy unavailable");
+        }
+    }
+
+    public bool ApplyCombatClearanceTargeting()
+    {
+        if (activePresetName == null || DateTimeOffset.UtcNow < strategyRetryAfter) return false;
+        try
+        {
+            var success = true;
+            success &= SetStrategy(AutoTarget, "General", "Passive");
+            success &= SetStrategy(AutoTarget, "FATE", "Disabled");
+            success &= SetStrategy(AutoTarget, "Retarget", "Never");
+            success &= SetStrategy(FateUtils, "Collect", "Disabled");
+            success &= SetStrategy(FateUtils, "Chocobo", "Disabled");
+            success &= SetStrategy(FateUtils, "Sync", "None");
+            if (!success)
+            {
+                strategyRetryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
+                log.Debug("BossModPresetManager: defensive clearance targeting rejected; retrying later");
+            }
+            return success;
+        }
+        catch (Exception ex)
+        {
+            strategyRetryAfter = DateTimeOffset.UtcNow.AddSeconds(5);
+            log.Debug(ex, "BossModPresetManager: defensive clearance targeting unavailable");
+            return false;
         }
     }
 

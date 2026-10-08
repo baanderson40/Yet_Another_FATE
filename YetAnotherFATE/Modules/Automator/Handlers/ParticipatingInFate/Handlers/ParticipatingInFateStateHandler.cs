@@ -9,6 +9,7 @@ using YetAnotherFATE.Services.Combat;
 using YetAnotherFATE.Services.Combat.RotationSolver;
 using YetAnotherFATE.Services.Combat.Wrath;
 using YetAnotherFATE.Services.Combat.BossMod;
+using YetAnotherFATE.Services.Combat.Clearance;
 using YetAnotherFATE.Services.Fates;
 using YetAnotherFATE.Services.Fates.CombatHelper.LevelSync;
 using YetAnotherFATE.Services.Fates.CombatHelper.Engagement;
@@ -47,6 +48,7 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
     private readonly IGameGui gameGui;
     private readonly IObjectTable objectTable;
     private readonly AutomaticTravelPolicy automaticTravel;
+    private readonly ICombatClearanceTargeter? clearanceTargeter;
     private DateTimeOffset participatingEnteredAt;
     private DateTimeOffset postEnteredAt;
     private DateTimeOffset collectionEndedAt;
@@ -77,7 +79,8 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         IGameGui gameGui,
         IObjectTable objectTable,
         AutomaticTravelPolicy automaticTravel,
-        IPluginLog log)
+        IPluginLog log,
+        ICombatClearanceTargeter? clearanceTargeter = null)
     {
         this.fateRepository = fateRepository;
         this.combatHandler = combatHandler;
@@ -98,6 +101,7 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         this.objectTable = objectTable;
         this.automaticTravel = automaticTravel;
         this.log = log;
+        this.clearanceTargeter = clearanceTargeter;
     }
 
     public bool CanHandle(AutomatorState state) => state is AutomatorState.Participating or AutomatorState.PostFate;
@@ -108,6 +112,7 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         lastObservedFate = default;
         collectionInteractionOwned = postCombatCleaned = false;
         outsideFateSince = DateTimeOffset.MinValue;
+        levelSyncService.Reset();
     }
 
     public AutomatorStateHandlerResult Tick(AutomatorContext context)
@@ -143,6 +148,7 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         var selection = context.CurrentSelection;
         if (selection == null)
         {
+            levelSyncService.Reset();
             textAdvance.Disable();
             return AutomatorStateHandlerResult.Transition(AutomatorState.PostFate, "Selection missing in participating state");
         }
@@ -156,6 +162,10 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         var active = fateRepository.EnumerateActiveFates();
         if (!active.Any(f => IsSameOccurrence(f, selection.Value.Fate)))
         {
+            levelSyncService.Reset();
+            context.EndedFateId = selection.Value.Fate.FateId;
+            clearanceTargeter?.CaptureEndedFate(selection.Value.Fate);
+            StopFateOffense("FATE reached terminal state");
             var completion = fateRepository.TryGetTerminalFate(selection.Value.Fate.FateId, out var terminal)
                 ? completionTracker.RecordTerminal(terminal)
                 : completionTracker.RecordMissing(lastObservedFate);
@@ -209,6 +219,9 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         if (lastObservedFate.IsCollect && lastObservedFate.Progress >= 100 &&
             !condition[ConditionFlag.InCombat] && !condition[ConditionFlag.OccupiedInQuestEvent])
         {
+            context.EndedFateId = lastObservedFate.FateId;
+            clearanceTargeter?.CaptureEndedFate(lastObservedFate);
+            StopFateOffense("Collection objective completed");
             collectionEndedAt = DateTimeOffset.UtcNow;
             automaticTravel.WaitForExpiry(lastObservedFate);
             completionTracker.RecordTerminal(lastObservedFate);
@@ -217,10 +230,11 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
             context.ClearSelection("Collection objective complete", log);
             return AutomatorStateHandlerResult.Transition(AutomatorState.PostFate, "Collection objective complete; awaiting rewards");
         }
-        if (!levelSyncService.EnsureSynced(selection.Value))
+        var syncSelection = selection.Value with { Fate = lastObservedFate };
+        if (!levelSyncService.EnsureSynced(syncSelection))
         {
-            EmitLevelSyncReminder(selection.Value);
-            return AutomatorStateHandlerResult.Wait("Waiting for level sync");
+            EmitLevelSyncReminder(syncSelection);
+            return AutomatorStateHandlerResult.Wait(levelSyncService.Status);
         }
 
         var rotationProvider = combatPlugins.GetPreferredRotation(configuration.PreferredRotationProvider);
@@ -351,8 +365,31 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
             }
         }
 
+        clearanceTargeter?.CompleteEndedFate();
+        context.EndedFateId = null;
         context.ClearSelection("Post-fate cleanup", log);
         return AutomatorStateHandlerResult.Transition(AutomatorState.SelectingFate, "Post-fate cleanup complete");
+    }
+
+    private void StopFateOffense(string reason)
+    {
+        var rotation = combatPlugins.GetPreferredRotation(configuration.PreferredRotationProvider);
+        var dodge = combatPlugins.GetPreferredDodge(configuration.PreferredDodgeProvider);
+        var bossModOwnsProvider = rotation?.Id is CombatPluginId.BossMod or CombatPluginId.BossModReborn ||
+            dodge?.Id is CombatPluginId.BossMod or CombatPluginId.BossModReborn;
+        if (bossModOwnsProvider)
+        {
+            bossModPresetManager.EnsurePresets();
+            bossModPresetManager.ActivatePassivePreset();
+            bossModPresetManager.ApplyCombatClearanceTargeting();
+        }
+        else
+        {
+            bossModPresetManager.DeactivateActivePreset();
+        }
+        rotationSolverBridge.NotifyFateEnded();
+        wrathComboBridge.NotifyAutomationStopped();
+        combatHandler.Reset(reason);
     }
 
     private unsafe void UpdateCollectionInteraction(ActiveFate fate, bool allowNewInteraction = true)
@@ -459,8 +496,12 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         }
 
         log.Debug(
-            "Automator: waiting for level sync before engaging fate #{FateId}",
-            selection.Fate.FateId);
+            "Automator: waiting for FATE sync #{FateId}; playerLevel={PlayerLevel} fateLevel={FateLevel} maxLevel={FateMaxLevel} syncStatus={Status}",
+            selection.Fate.FateId,
+            objectTable.LocalPlayer == null ? 0 : objectTable.LocalPlayer.Level,
+            selection.Fate.Level,
+            selection.Fate.MaxLevel,
+            levelSyncService.Status);
         nextSyncLogAt = DateTimeOffset.UtcNow.AddSeconds(3);
     }
 

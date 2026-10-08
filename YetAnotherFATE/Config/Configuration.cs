@@ -46,6 +46,7 @@ public class Configuration : IPluginConfiguration
     public float TeleportAdvantageThresholdSeconds { get; set; } = 5.0f;
     public uint TeleportMaxGilCost { get; set; } = 9999;
     public bool ZoneRotationEnabled { get; set; } = false;
+    public bool ReturnToNearestAetheryteWhenIdle { get; set; } = false;
     public bool ZoneRotationSameExpansionFallback { get; set; } = false;
     public List<uint> ZoneRotationTerritories { get; set; } = new();
     public int ZoneRotationEmptyDelaySeconds { get; set; } = 30;

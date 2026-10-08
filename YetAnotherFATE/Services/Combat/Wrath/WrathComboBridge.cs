@@ -113,6 +113,21 @@ public sealed class WrathComboBridge : IWrathComboBridge, IDisposable
         return true;
     }
 
+    public bool ConfigureForCombatClearance()
+    {
+        if (!EnsureAllSubscribers() || !EnsureIpcReady() || !EnsureLease() || !EnsureJobReady())
+            return false;
+        if (!autoEnabled && !SetAutoRotationState(true))
+            return false;
+
+        var success = true;
+        success &= InvokeConfig(activeLease!.Value, WrathAutoConfigOption.InCombatOnly, true);
+        success &= InvokeConfig(activeLease.Value, WrathAutoConfigOption.FatePriority, false);
+        success &= InvokeConfig(activeLease.Value, WrathAutoConfigOption.DpsRotationMode, (int)WrathDpsRotationMode.Manual);
+        configApplied = success;
+        return success;
+    }
+
     public void NotifyAutomationStopped()
     {
         if (activeLease is not { } lease)

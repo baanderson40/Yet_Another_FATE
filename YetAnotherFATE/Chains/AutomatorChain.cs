@@ -36,6 +36,7 @@ public sealed class AutomatorChain : IDisposable
     private readonly AutomaticTravelPolicy automaticTravel;
     private readonly AutoRetainerHandoffController? autoRetainerHandoff;
     private readonly IChocoboController? chocoboController;
+    private readonly IdleAetheryteReturnController? idleAetheryteReturn;
     private uint territory;
     private readonly ITextAdvanceClient textAdvance;
     private readonly IFateRewardTracker rewardTracker;
@@ -66,6 +67,8 @@ public sealed class AutomatorChain : IDisposable
     public string AutoRetainerHandoffStatus => autoRetainerHandoff?.Status ?? "Unavailable";
     public AutoRetainerReadinessSnapshot AutoRetainerReadiness => autoRetainerHandoff?.LastReadiness ?? default;
     public string ChocoboStatus => chocoboController?.Status ?? "Unavailable";
+    public string IdleAetheryteReturnStatus => idleAetheryteReturn?.Status ?? "Unavailable";
+    public string CombatClearanceStatus => handlers.OfType<ClearingCombatStateHandler>().FirstOrDefault()?.ClearanceStatus ?? "Unavailable";
 
     public AutomatorChain(
         ITravelController travelController,
@@ -87,7 +90,8 @@ public sealed class AutomatorChain : IDisposable
         FateObstacleMapAssurance mapAssurance,
         AutomaticTravelPolicy automaticTravel,
         AutoRetainerHandoffController? autoRetainerHandoff = null,
-        IChocoboController? chocoboController = null)
+        IChocoboController? chocoboController = null,
+        IdleAetheryteReturnController? idleAetheryteReturn = null)
     {
         this.travelController = travelController;
         this.log = log;
@@ -112,6 +116,7 @@ public sealed class AutomatorChain : IDisposable
         this.automaticTravel = automaticTravel;
         this.autoRetainerHandoff = autoRetainerHandoff;
         this.chocoboController = chocoboController;
+        this.idleAetheryteReturn = idleAetheryteReturn;
 
         travelController.PhaseChanged += OnTravelPhaseChanged;
     }
@@ -162,6 +167,7 @@ public sealed class AutomatorChain : IDisposable
         wrathComboBridge.NotifyAutomationStopped();
         combatHandler.Reset(reason);
         chocoboController?.Reset();
+        idleAetheryteReturn?.Reset();
         foreach (var handler in handlers)
             handler.Reset();
         context.Reset(log);
@@ -200,6 +206,7 @@ public sealed class AutomatorChain : IDisposable
         if (territory != clientState.TerritoryType)
         {
             chocoboController?.Reset();
+            idleAetheryteReturn?.Reset();
             var previousTerritory = territory;
             territory = clientState.TerritoryType;
             var automaticTravelOwnsTransition = travelController.CurrentJob is { Kind: TravelRequestKind.Automatic } ||
@@ -309,6 +316,9 @@ public sealed class AutomatorChain : IDisposable
         if (context.State == AutomatorState.SelectingFate && chocoboController?.Tick() == true)
             return;
 
+        if (context.State == AutomatorState.SelectingFate && idleAetheryteReturn?.Tick() == true)
+            return;
+
         if (context.State == AutomatorState.SelectingFate && rotatingHandler?.TryOwnSelection(context) == true)
             return;
 
@@ -398,6 +408,7 @@ public sealed class AutomatorChain : IDisposable
         wrathComboBridge.NotifyAutomationStopped();
         combatHandler.Reset("Automator disabled");
         chocoboController?.Reset();
+        idleAetheryteReturn?.Reset();
     }
 
     private void OnTravelPhaseChanged(object? sender, TravelPhaseChangedEventArgs args)

@@ -19,6 +19,8 @@ using YetAnotherFATE.Data.Automator;
 using YetAnotherFATE.Services.Combat;
 using YetAnotherFATE.Services.Combat.BossMod;
 using YetAnotherFATE.Services.Companions;
+using YetAnotherFATE.Services.Combat.Clearance;
+using YetAnotherFATE.Services.Fates.CombatHelper.LevelSync;
 using YetAnotherFATE.Services.Combat.RotationSolver;
 using YetAnotherFATE.Services.Combat.Wrath;
 using YetAnotherFATE.Services.Fates.CombatHelper.Engagement;
@@ -26,7 +28,6 @@ using YetAnotherFATE.Services.Fates.CombatHelper.Targeter;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Game.ClientState.Conditions;
 using YetAnotherFATE.Modules.Automator.Handlers.ParticipatingInFate.Handlers;
-using YetAnotherFATE.Services.Fates.CombatHelper.LevelSync;
 using YetAnotherFATE.Services.Zone;
 using YetAnotherFATE.Services.Movement;
 using YetAnotherFATE.Data.Zone;
@@ -146,6 +147,9 @@ class Program
          var invalidCompanion = new Configuration { Version = 3, ChocoboStance = (YetAnotherFATE.Data.Companions.ChocoboStance)99 };
          invalidCompanion.Initialize(pi); Check(invalidCompanion.Version == 4 && invalidCompanion.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "invalid chocobo stance normalized");
          TestChocoboController(log);
+         TestNearestAetheryteReturnRoute();
+         TestCombatClearanceTargetPolicy();
+         TestLevelSyncService();
         var retainerReady = typeof(AutoRetainerClient).GetMethod("IsRetainerReady", BindingFlags.Static | BindingFlags.NonPublic)!;
         Check((bool)retainerReady.Invoke(null, [new long[] { 30, 45 }, 30L, true, 60L])!, "all retainers honor advance threshold");
         Check(!(bool)retainerReady.Invoke(null, [new long[] { 30, 90 }, 30L, true, 60L])!, "wait-for-all blocks on late retainer");
@@ -739,6 +743,97 @@ class Program
         Check(cancelled, "travel combat wait cancels through framework dispatch");
         Check(conditionReads > 0 && outsideFrameworkReads == 0, "travel combat condition reads stay on framework thread");
     }
+
+    static void TestNearestAetheryteReturnRoute()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var target = new AetheryteSummary(77, 100, "Nearest Crystal", 0, new(100, 0, 100), "test", true, true, 3, 25, false);
+        var zone = new ZoneInfo(100, "Test Zone", 0, true, true, target, [target], [target], true, false, default, now);
+        var requests = 0;
+        var state = TeleportState.Idle;
+        DateTimeOffset? completed = null;
+        var zones = Stub<IZoneService>((method, _) => method.Name == "GetZone" ? zone : Noop.Default(method));
+        var teleports = Stub<ITeleportExecutor>((method, args) =>
+        {
+            if (method.Name == "get_State") return state;
+            if (method.Name == "get_LastCompletedAt") return completed;
+            if (method.Name == "get_LastFailedAt") return null;
+            if (method.Name == "RequestTeleport")
+            {
+                requests++;
+                var recommendation = (TeleportRecommendation)args![0]!;
+                Check(recommendation.AetheryteId == 77 && recommendation.SubIndex == 3, "aetheryte route preserves target sub-index");
+                state = TeleportState.Starting;
+                return TeleportRequestResult.Issued;
+            }
+
+            return Noop.Default(method);
+        });
+        var route = new NearestAetheryteReturnRoute(new Configuration { TeleportMaxGilCost = 100 }, zones, teleports);
+        var first = route.Tick(100, Vector3.Zero, true, true, now);
+        Check(first == AetheryteReturnResult.Waiting && requests == 1, "aetheryte route issues one nearest-main teleport");
+
+        state = TeleportState.Completed;
+        completed = now.AddSeconds(1);
+        var settling = route.Tick(100, target.Position, true, true, now.AddSeconds(2));
+        Check(settling == AetheryteReturnResult.Waiting, "aetheryte route waits for stable arrival");
+        Check(route.Tick(100, target.Position, true, true, now.AddSeconds(3)) == AetheryteReturnResult.Arrived,
+            "aetheryte route confirms same-zone arrival by position");
+        Check(requests == 1, "aetheryte route does not duplicate teleport");
+
+        state = TeleportState.Idle;
+        var nearby = new NearestAetheryteReturnRoute(new Configuration { TeleportMaxGilCost = 100 }, zones, teleports);
+        Check(nearby.Tick(100, target.Position, true, true, now) == AetheryteReturnResult.Arrived && requests == 1,
+            "nearby player skips aetheryte teleport");
+    }
+
+    static void TestCombatClearanceTargetPolicy()
+    {
+        Check(!CombatClearanceTargetPolicy.IsEligible(514, true, true, true, true, false),
+            "tagged FATE target excluded during post-FATE clearance");
+        Check(!CombatClearanceTargetPolicy.IsEligible(0, true, true, true, true, true),
+            "remembered ended-FATE target excluded after tag clears");
+        Check(CombatClearanceTargetPolicy.IsEligible(0, true, true, true, true, false),
+            "alive non-FATE enemy attacking player is eligible");
+        Check(!CombatClearanceTargetPolicy.IsEligible(0, true, true, true, false, false),
+            "nearby passive enemy is not pulled during cleanup");
+        Check(!CombatClearanceTargetPolicy.IsEligible(0, false, true, true, true, false),
+            "dead enemy excluded from defensive clearance");
+        Check(!CombatClearanceTargetPolicy.IsEligible(0, true, true, false, true, false),
+            "friendly target excluded from defensive clearance");
+    }
+
+    static void TestLevelSyncService()
+    {
+        var fate = new ActiveFate(517, "Test FATE", 44, 100, default, 50, 0, false, TimeSpan.FromMinutes(5),
+            Dalamud.Game.ClientState.Fates.FateState.Running, 0, "", "", 0, 0, false, 49, 0, 0, 1234, 300,
+            0, 0, 0, 0, 0, 0, 0);
+        var selection = new FateSelection(fate, default, false, null, 0, "test", default);
+        var api = new FakeLevelSyncApi(new(true, true, 100, 7, 49, 49, 517, 1234, 44, 49, false));
+        var sync = new LevelSyncService(api);
+        Check(sync.EnsureSynced(selection) && api.Requests == 0, "player at FATE maximum does not require level sync");
+
+        api.Snapshot = api.Snapshot with { PlayerLevel = 50, EffectiveLevel = 50 };
+        Check(!sync.EnsureSynced(selection) && api.Requests == 1 && sync.Status.Contains("requested", StringComparison.OrdinalIgnoreCase),
+            "player above FATE maximum requests level sync");
+        Check(!sync.EnsureSynced(selection) && api.Requests == 1, "level sync retries respect attempt cooldown");
+
+        api.Snapshot = api.Snapshot with { IsSyncedToCurrentFate = true, EffectiveLevel = 49 };
+        Check(sync.EnsureSynced(selection), "native selected-FATE sync confirmation releases participation");
+
+        sync.Reset();
+        api.Snapshot = api.Snapshot with { IsSyncedToCurrentFate = false, CurrentFateId = 0 };
+        Check(!sync.EnsureSynced(selection) && api.Requests == 1 && sync.Status.Contains("registration", StringComparison.OrdinalIgnoreCase),
+            "missing native current FATE waits without sending sync");
+
+        sync.Reset();
+        api.Snapshot = api.Snapshot with { CurrentFateId = 518 };
+        Check(!sync.EnsureSynced(selection) && api.Requests == 1, "different native FATE cannot receive selected FATE sync request");
+
+        sync.Reset();
+        api.Snapshot = api.Snapshot with { CurrentFateId = 517, PlayerReady = false };
+        Check(!sync.EnsureSynced(selection) && api.Requests == 1, "unloaded player remains gated");
+    }
 }
 public class Noop : DispatchProxy
 {
@@ -790,5 +885,18 @@ sealed class FakeChocoboApi : IChocoboCompanionApi
         Dismounts++;
         Snapshot = Snapshot with { IsMounted = false };
         return ChocoboActionResult.Issued;
+    }
+}
+
+sealed class FakeLevelSyncApi : ILevelSyncGameApi
+{
+    public LevelSyncSnapshot Snapshot;
+    public int Requests;
+    public FakeLevelSyncApi(LevelSyncSnapshot snapshot) => Snapshot = snapshot;
+    public LevelSyncSnapshot Read() => Snapshot;
+    public LevelSyncRequestResult TryRequestSync(FateSelection selection)
+    {
+        Requests++;
+        return LevelSyncRequestResult.Requested;
     }
 }

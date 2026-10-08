@@ -16,6 +16,7 @@ public sealed class AutomatorContext
     public DateTimeOffset? SelectionUpdatedAt { get; private set; }
     public string? SelectionReason { get; private set; }
     public AutomatorState CombatClearanceReturnState { get; set; } = AutomatorState.SelectingFate;
+    public uint? EndedFateId { get; set; }
     public TravelPhase TravelPhase { get; private set; } = TravelPhase.Idle;
     public string? TravelPhaseDetail { get; private set; }
 
@@ -77,6 +78,7 @@ public sealed class AutomatorContext
         SelectionUpdatedAt = null;
         SelectionReason = null;
         CombatClearanceReturnState = AutomatorState.SelectingFate;
+        EndedFateId = null;
         State = AutomatorState.Disabled;
         LastStateChangedAt = DateTimeOffset.UtcNow;
         LastStateReason = "reset";

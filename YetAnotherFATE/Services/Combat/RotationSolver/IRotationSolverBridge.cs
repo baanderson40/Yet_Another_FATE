@@ -6,5 +6,6 @@ public interface IRotationSolverBridge
 {
     void EngageNearestAuto(FateSelection selection);
     void EngageNearestAuto();
+    void EngageManualTarget();
     void NotifyFateEnded();
 }

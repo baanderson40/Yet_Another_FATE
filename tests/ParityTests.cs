@@ -41,19 +41,20 @@ static class Tests
             manager.ActivateRotationPreset();
             Check(active.SequenceEqual(new[] { "YAFate Farming" }), "provider activation");
             for (var i = 0; i < 100; i++) manager.ApplyFateTargetLimit();
-            Check(adds == 3, "unchanged target limit emits one call per owned strategy");
+            Check(adds == 4, "unchanged target limit emits one call per owned strategy");
             config.BossModMaxTargets = 9;
             manager.ApplyFateTargetLimit();
-            Check(adds == 4, "target limit changes once");
+            Check(adds == 5, "target limit changes once");
             config.CollectionPolicy = FateCollectionPolicy.KillOnly;
             manager.ApplyFateTargetLimit();
             Check(tracks["BossMod.Autorotation.MiscAI.AutoTarget/CollectFATE"] == "Disabled", "KillOnly target control");
             Check(tracks["BossMod.Autorotation.MiscAI.FateUtils/Collect"] == "Disabled", "KillOnly collect control");
             Check(tracks["BossMod.Autorotation.MiscAI.FateUtils/Chocobo"] == "Disabled", "YAF owns chocobo behavior");
-            Check(!tracks.Keys.Any(k => k.EndsWith("Hand-in") || k.EndsWith("Sync")), "provider defaults preserved");
+            Check(tracks["BossMod.Autorotation.MiscAI.FateUtils/Sync"] == "None", "YAF owns selected-FATE sync confirmation");
+            Check(!tracks.Keys.Any(k => k.EndsWith("Hand-in")), "provider hand-in default preserved");
             config.CollectionPolicy = FateCollectionPolicy.BossModDefault;
             manager.ApplyFateTargetLimit();
-            Check(clears == 1 && tracks.Count == 3, "runtime policy removes only AutoTarget collection override");
+            Check(clears == 1 && tracks.Count == 4, "runtime policy removes only AutoTarget collection override");
             rejectRestore = true;
             manager.ReleasePresets();
             Check(deletes == 0 && active[0] == "YAFate Farming", "failed restore retains owned preset");
@@ -81,7 +82,7 @@ static class Tests
             manager.DeactivateActivePreset();
             manager.ActivateRotationPreset();
             manager.ApplyFateTargetLimit();
-            Check(adds == 6, "already-absent transient tracks are reapplied after reactivation");
+            Check(adds == 8, "already-absent transient tracks are reapplied after reactivation");
         }
         {
             var ipc = new FakeIpc(); var mutated = false;
@@ -90,6 +91,28 @@ static class Tests
             ipc.Bind("Presets.SetActiveList", new Func<List<string>, bool>(_ => mutated = true));
             new BossModPresetManager(ipc, new Registry(), new Configuration(), new Log(), new PlayerState()).ActivateRotationPreset();
             Check(!mutated, "capture failure does not change global presets");
+        }
+        {
+            var ipc = new FakeIpc();
+            var active = new List<string>();
+            var strategies = new Dictionary<string, string>();
+            ipc.Bind("Presets.Create", new Func<string, bool, bool>((_, _) => true));
+            ipc.Bind("Presets.GetActiveList", new Func<List<string>>(() => active.ToList()));
+            ipc.Bind("Presets.SetActiveList", new Func<List<string>, bool>(names => { active = names.ToList(); return true; }));
+            ipc.Bind("Presets.AddTransientStrategy", new Func<string, string, string, string, bool>((_, module, track, value) => { strategies[module + "/" + track] = value; return true; }));
+            ipc.Bind("Presets.ClearTransientStrategy", new Func<string, string, string, bool>((_, module, track) => strategies.Remove(module + "/" + track)));
+            ipc.Bind("Presets.Delete", new Func<string, bool>(_ => true));
+            var manager = new BossModPresetManager(ipc, new Registry(), new Configuration(), new Log(), new PlayerState());
+            manager.ActivateRotationPreset();
+            Check(manager.ApplyCombatClearanceTargeting(), "BossMod clearance strategy accepted");
+            Check(strategies["BossMod.Autorotation.MiscAI.AutoTarget/General"] == "Passive" &&
+                  strategies["BossMod.Autorotation.MiscAI.AutoTarget/FATE"] == "Disabled" &&
+                  strategies["BossMod.Autorotation.MiscAI.AutoTarget/Retarget"] == "Never",
+                "BossMod clearance prevents target acquisition and retargeting");
+            Check(strategies["BossMod.Autorotation.MiscAI.FateUtils/Sync"] == "None",
+                "BossMod does not toggle FATE sync during YAF clearance");
+            manager.DeactivateActivePreset();
+            Check(active.Count == 0 && strategies.Count == 0, "clearance transient strategies restored");
         }
         {
             var ipc = new FakeIpc(); var frame = new Frame(); var state = TaskStatus.RanToCompletion; var hasMap = false; var clearCount = 0; var rejected = true;

@@ -28,6 +28,7 @@ using YetAnotherFATE.Services.Combat.Wrath;
 using YetAnotherFATE.Services.Combat.BossMod;
 using YetAnotherFATE.Services.Retainers;
 using YetAnotherFATE.Services.Companions;
+using YetAnotherFATE.Services.Combat.Clearance;
 
 namespace YetAnotherFATE;
 
@@ -122,6 +123,9 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton<UxModule>();
         services.AddSingleton<AutomatorModule>();
         services.AddSingleton<AutomatorChain>();
+        services.AddSingleton<ICombatClearanceTargeter, CombatClearanceTargeter>();
+        services.AddTransient<NearestAetheryteReturnRoute>();
+        services.AddSingleton<IdleAetheryteReturnController>();
         services.AddSingleton<IChocoboCompanionApi, ChocoboCompanionApi>();
         services.AddSingleton<IChocoboController, ChocoboController>();
         services.AddSingleton<IAutoRetainerClient, AutoRetainerClient>();
@@ -222,10 +226,8 @@ public sealed class Plugin : IDalamudPlugin
             provider.GetRequiredService<IBossModObstacleMap>(),
             provider.GetRequiredService<AutomaticTravelPolicy>(),
             provider.GetRequiredService<IPluginLog>()));
-        services.AddSingleton<ILevelSyncService>(provider => new LevelSyncService(
-            provider.GetRequiredService<IPlayerState>(),
-            provider.GetRequiredService<ICondition>(),
-            provider.GetRequiredService<IPluginLog>()));
+        services.AddSingleton<ILevelSyncGameApi, LevelSyncGameApi>();
+        services.AddSingleton<ILevelSyncService, LevelSyncService>();
         services.AddSingleton<ITeleportAdvisor>(provider => new TeleportAdvisor(
             provider.GetRequiredService<IZoneService>(),
             provider.GetRequiredService<Configuration>(),

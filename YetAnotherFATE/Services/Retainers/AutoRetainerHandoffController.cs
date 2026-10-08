@@ -23,6 +23,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
     private readonly ICondition condition;
     private readonly IPluginLog log;
     private readonly TerritoryReturnRoute territoryReturnRoute;
+    private readonly NearestAetheryteReturnRoute safeLocationRoute;
     private DateTimeOffset nextReadinessScan = DateTimeOffset.MinValue;
     private DateTimeOffset nextReturnAttempt = DateTimeOffset.MinValue;
     private bool manualPassRequested;
@@ -39,7 +40,8 @@ public sealed class AutoRetainerHandoffController : IDisposable
         IObjectTable objectTable,
         ICondition condition,
         IPluginLog log,
-        TerritoryReturnRoute territoryReturnRoute)
+        TerritoryReturnRoute territoryReturnRoute,
+        NearestAetheryteReturnRoute safeLocationRoute)
     {
         this.configuration = configuration;
         this.autoRetainer = autoRetainer;
@@ -50,6 +52,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
         this.condition = condition;
         this.log = log;
         this.territoryReturnRoute = territoryReturnRoute;
+        this.safeLocationRoute = safeLocationRoute;
         autoRetainer.SinglePassFinished += OnSinglePassFinished;
 
         if (configuration.AutoRetainerHandoff is { Phase: not AutoRetainerHandoffPhase.Idle })
@@ -90,6 +93,14 @@ public sealed class AutoRetainerHandoffController : IDisposable
 
         session.LastError = null;
         territoryReturnRoute.Reset();
+        if (!session.RequestIssued)
+        {
+            safeLocationRoute.Reset();
+            session.SafeLocationPrepared = false;
+            SetPhase(session, AutoRetainerHandoffPhase.PreparingSafeLocation);
+            Status = "Retrying safe-location preparation";
+            return true;
+        }
         if (clientState.IsLoggedIn && playerState.ContentId == session.OriginalContentId && IsPlayerSafe())
             SetPhaseAfterOriginalCharacter(session);
         else
@@ -115,6 +126,14 @@ public sealed class AutoRetainerHandoffController : IDisposable
             return false;
         session.LastError = null;
         territoryReturnRoute.Reset();
+        if (!session.RequestIssued)
+        {
+            safeLocationRoute.Reset();
+            session.SafeLocationPrepared = false;
+            SetPhase(session, AutoRetainerHandoffPhase.PreparingSafeLocation);
+            Status = "Resuming safe-location preparation";
+            return true;
+        }
         if (clientState.IsLoggedIn && playerState.ContentId == session.OriginalContentId && IsPlayerSafe())
             SetPhaseAfterOriginalCharacter(session);
         else
@@ -167,6 +186,8 @@ public sealed class AutoRetainerHandoffController : IDisposable
 
         switch (session.Phase)
         {
+            case AutoRetainerHandoffPhase.PreparingSafeLocation:
+                return TickPreparingSafeLocation(session);
             case AutoRetainerHandoffPhase.Starting:
                 return TickStarting(session);
             case AutoRetainerHandoffPhase.WaitingForAutoRetainer:
@@ -185,6 +206,42 @@ public sealed class AutoRetainerHandoffController : IDisposable
             default:
                 return true;
         }
+    }
+
+    private bool TickPreparingSafeLocation(AutoRetainerHandoffSession session)
+    {
+        if (!clientState.IsLoggedIn || playerState.ContentId != session.OriginalContentId)
+        {
+            Fail(session, "Original character was not available while preparing safe AutoRetainer location");
+            return true;
+        }
+
+        var player = objectTable.LocalPlayer;
+        var ready = clientState.TerritoryType != 0 && playerState.IsLoaded && player is { CurrentHp: > 0 } &&
+            !condition[ConditionFlag.BetweenAreas] && !condition[ConditionFlag.BetweenAreas51];
+        var result = safeLocationRoute.Tick(clientState.TerritoryType, player?.Position, ready,
+            IsPlayerSafe() && configuration.TeleportEnabled, DateTimeOffset.UtcNow);
+        if (result == AetheryteReturnResult.Arrived)
+        {
+            session.SafeLocationPrepared = true;
+            session.SafeLocationAetheryteId = safeLocationRoute.DestinationAetheryteId;
+            session.SafeLocationSubIndex = safeLocationRoute.DestinationSubIndex;
+            configuration.Save();
+            SetPhase(session, AutoRetainerHandoffPhase.Starting);
+            Status = $"Safe at {safeLocationRoute.DestinationName}; starting AutoRetainer";
+        }
+        else if (result == AetheryteReturnResult.Failed)
+        {
+            Fail(session, safeLocationRoute.Failure ?? "Could not reach safe aetheryte before AutoRetainer");
+        }
+        else
+        {
+            Status = safeLocationRoute.IsTeleportIssued
+                ? $"Returning to {safeLocationRoute.DestinationName} before AutoRetainer"
+                : "Preparing safe aetheryte location before AutoRetainer";
+        }
+
+        return true;
     }
 
     private bool TickStarting(AutoRetainerHandoffSession session)
@@ -224,6 +281,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
         configuration.Save();
         if (!autoRetainer.TryEnableSinglePass(session.Mode))
         {
+            session.RequestIssued = false;
             Fail(session, "AutoRetainer rejected the single-pass request");
             return true;
         }
@@ -445,7 +503,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
         var now = DateTimeOffset.UtcNow;
         var session = new AutoRetainerHandoffSession
         {
-            Phase = AutoRetainerHandoffPhase.Starting,
+            Phase = AutoRetainerHandoffPhase.PreparingSafeLocation,
             OriginalContentId = playerState.ContentId,
             OriginalTerritoryId = clientState.TerritoryType,
             OriginalPosition = player.Position,
@@ -457,12 +515,14 @@ public sealed class AutoRetainerHandoffController : IDisposable
             PhaseStartedAtUtc = now,
             StartedByYaf = true,
             RequestIssued = false,
+            SafeLocationPrepared = false,
         };
         configuration.AutoRetainerHandoff = session;
         configuration.Save();
         chain.PrepareForExternalHandoff("AutoRetainer handoff starting");
+        safeLocationRoute.Reset();
         manualPassRequested = false;
-        Status = "Preparing AutoRetainer handoff";
+        Status = "Preparing safe aetheryte location before AutoRetainer";
     }
 
     private void SetPhase(AutoRetainerHandoffSession session, AutoRetainerHandoffPhase phase)
@@ -505,6 +565,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
     private bool IsPlayerSafe()
         => clientState.IsLoggedIn && playerState.IsLoaded && objectTable.LocalPlayer is { CurrentHp: > 0 } &&
            !condition[ConditionFlag.BetweenAreas] && !condition[ConditionFlag.BetweenAreas51] &&
+           !condition[ConditionFlag.Unconscious] && !condition[ConditionFlag.Casting] &&
            !condition[ConditionFlag.InCombat] && !condition[ConditionFlag.Occupied] &&
            !condition[ConditionFlag.OccupiedInEvent] && !condition[ConditionFlag.OccupiedInQuestEvent];
 

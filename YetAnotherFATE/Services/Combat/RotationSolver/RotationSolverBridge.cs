@@ -76,6 +76,24 @@ public sealed class RotationSolverBridge : IRotationSolverBridge
         }
     }
 
+    public void EngageManualTarget()
+    {
+        if (!TryInitializeIpc())
+            return;
+        try
+        {
+            autodutySubscriber?.InvokeAction(3, TargetNearest);
+            engagedFateId = null;
+            autoEngaged = true;
+            nextEngageRefresh = DateTimeOffset.UtcNow.AddSeconds(5);
+            log.Debug("RotationSolverBridge: engaged manual-target rotation for combat clearance");
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "RotationSolverBridge: failed to engage manual-target mode for combat clearance");
+        }
+    }
+
     public void NotifyFateEnded()
     {
         engagedFateId = null;

@@ -129,7 +129,11 @@ public sealed class DebugRenderer
         ImGui.Text($"Teleport: {teleportExecutor.State} | Navmesh: {navmeshClient.IsAvailable} ({navmeshClient.Status})");
         ImGui.Text($"Activation: {fateActivationService.Status}");
         ImGui.TextWrapped($"Zone rotation: {automatorChain.ZoneRotationStatus}");
+        if (configuration.ReturnToNearestAetheryteWhenIdle && !configuration.ZoneRotationEnabled)
+            ImGui.TextWrapped($"Idle return: {automatorChain.IdleAetheryteReturnStatus}");
         ImGui.TextWrapped($"Chocobo: {automatorChain.ChocoboStatus}");
+        if (automatorChain.State == YetAnotherFATE.Data.Automator.AutomatorState.ClearingCombat)
+            ImGui.TextWrapped($"Combat clearance: {automatorChain.CombatClearanceStatus}");
         ImGui.Text($"Follow-up: {followUpTracker.Status}");
         ImGui.Text($"Rewards completed: {rewardTracker.CompletedCount}");
         if (rewardTracker.Remaining is { } remaining)

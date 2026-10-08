@@ -20,5 +20,8 @@ public sealed class AutoRetainerHandoffSession
     public bool RequestIssued { get; set; }
     public bool ObservedAutoRetainerActive { get; set; }
     public bool CompletionEventObserved { get; set; }
+    public bool SafeLocationPrepared { get; set; }
+    public uint SafeLocationAetheryteId { get; set; }
+    public byte SafeLocationSubIndex { get; set; }
     public string? LastError { get; set; }
 }
