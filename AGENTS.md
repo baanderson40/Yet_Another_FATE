@@ -4,6 +4,7 @@
 
 - Requires .NET 10 SDK and Dalamud API 15 development files. Production targets Windows/x64.
 - Plugin build: `dotnet build YetAnotherFATE/YetAnotherFATE.csproj --configuration Release -p:Platform=x64`.
+- Release DLL: `D:\Coding\C#\Yet_Another_FATE\YetAnotherFATE\bin\x64\Release\YetAnotherFATE.dll`.
 - Full solution build: `dotnet build YetAnotherFATE.sln --configuration Release -p:Platform=x64`.
 - Parity harness: `dotnet run --project tests/parity-tests.csproj --configuration Release`.
 - Integration harness on PowerShell:
