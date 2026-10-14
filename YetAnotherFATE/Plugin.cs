@@ -50,6 +50,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IAetheryteList AetheryteList { get; private set; } = null!;
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
     [PluginService] internal static IPartyList PartyList { get; private set; } = null!;
+    [PluginService] internal static IDutyState DutyState { get; private set; } = null!;
 
     public Configuration Configuration { get; }
     public WindowSystem WindowSystem { get; } = new("YetAnotherFATE");
@@ -113,6 +114,7 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton(AetheryteList);
         services.AddSingleton(Condition);
         services.AddSingleton(PartyList);
+        services.AddSingleton(DutyState);
 
         services.AddSingleton<ConfigWindow>();
         services.AddSingleton<DebugRenderer>();
@@ -132,6 +134,10 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton<ILifestreamCharacterClient, LifestreamCharacterClient>();
         services.AddSingleton<TerritoryReturnRoute>();
         services.AddSingleton<AutoRetainerHandoffController>();
+        services.AddSingleton<WahToolsFeeshStatusReader>();
+        services.AddSingleton<YesAlreadyLease>();
+        services.AddSingleton<IWahToolsFeeshClient, WahToolsFeeshClient>();
+        services.AddSingleton<OceanFishingHandoffController>();
         services.AddSingleton<IAutomatorStateHandler, TravellingToFateStateHandler>();
         services.AddSingleton<IAutomatorStateHandler, ActivatingFateStateHandler>();
         services.AddSingleton<IAutomatorStateHandler, RecoveringStateHandler>();

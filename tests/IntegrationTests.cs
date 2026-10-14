@@ -106,6 +106,11 @@ class Program
         Check(config.AutomatorEnabled && rewards.RunUntil == null && !rewards.PendingStop, "unlimited UI start resets run target");
 
         Check(new Configuration().FateMinTimeRemainingSeconds == 120, "reference minimum time default");
+        Check(!new Configuration().OceanFishingEnabled && new Configuration().OceanFishingLeadMinutes == 5,
+            "ocean fishing is opt-in with five-minute preparation lead");
+        var clampedFishingLead = new Configuration { OceanFishingLeadMinutes = 99 };
+        clampedFishingLead.Initialize(null!);
+        Check(clampedFishingLead.OceanFishingLeadMinutes == 30, "ocean fishing lead is clamped to supported range");
         var sceneMatcher = typeof(ActivatingFateStateHandler).GetMethod("MatchesInteractionScene", BindingFlags.Static | BindingFlags.NonPublic)!;
         Check((bool)sceneMatcher.Invoke(null, [77UL, 77UL, 12U])!, "owned SelectYesno matches NPC game object id");
         Check((bool)sceneMatcher.Invoke(null, [12UL, 77UL, 12U])!, "owned SelectYesno matches NPC entity id");
@@ -139,18 +144,30 @@ class Program
         Check(FateTargetPolicy.GetForlornPriority(1) == 0, "ordinary NameId has no Forlorn priority");
         var pi = DispatchProxy.Create<IDalamudPluginInterface, Noop>();
         var migrated = new Configuration { FateMinTimeRemainingSeconds = 240 };
-         migrated.Initialize(pi); Check(migrated.Version == 4 && migrated.FateMinTimeRemainingSeconds == 120 && migrated.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "old erroneous default migrated");
+         migrated.Initialize(pi); Check(migrated.Version == 5 && migrated.FateMinTimeRemainingSeconds == 120 && migrated.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "old erroneous default migrated");
         var custom = new Configuration { FateMinTimeRemainingSeconds = 75 };
         custom.Initialize(pi); Check(custom.FateMinTimeRemainingSeconds == 75, "custom minimum retained");
          var explicit240 = new Configuration { Version = 1, FateMinTimeRemainingSeconds = 240 };
          explicit240.Initialize(pi); Check(explicit240.FateMinTimeRemainingSeconds == 240, "versioned choice retained");
          var invalidCompanion = new Configuration { Version = 3, ChocoboStance = (YetAnotherFATE.Data.Companions.ChocoboStance)99 };
-         invalidCompanion.Initialize(pi); Check(invalidCompanion.Version == 4 && invalidCompanion.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "invalid chocobo stance normalized");
+          invalidCompanion.Initialize(pi); Check(invalidCompanion.Version == 5 && invalidCompanion.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "invalid chocobo stance normalized");
          TestChocoboController(log);
          TestNearestAetheryteReturnRoute();
          TestCombatClearanceTargetPolicy();
          TestLevelSyncService();
+         TestOceanFishingSchedule();
+         TestOceanFishingPolicy();
+         TestOceanCleanupPolicies();
         var retainerReady = typeof(AutoRetainerClient).GetMethod("IsRetainerReady", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var readCharacterString = typeof(AutoRetainerClient).GetMethod("ReadCharacterString", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var jObjectType = Type.GetType("Newtonsoft.Json.Linq.JObject, Newtonsoft.Json", throwOnError: true)!;
+        var parseJson = jObjectType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.Name == "Parse" && m.GetParameters() is [{ ParameterType: var parameterType }] && parameterType == typeof(string));
+        var offlineCharacter = parseJson
+            .Invoke(null, ["{\"Name\":\"Fishing Alt\",\"World\":\"Excalibur\"}"])!;
+        Check((string)readCharacterString.Invoke(null, [offlineCharacter, "Name"])! == "Fishing Alt" &&
+              (string)readCharacterString.Invoke(null, [offlineCharacter, "World"])! == "Excalibur",
+            "AutoRetainer IPC object roster extracts Newtonsoft JSON character fields");
         Check((bool)retainerReady.Invoke(null, [new long[] { 30, 45 }, 30L, true, 60L])!, "all retainers honor advance threshold");
         Check(!(bool)retainerReady.Invoke(null, [new long[] { 30, 90 }, 30L, true, 60L])!, "wait-for-all blocks on late retainer");
         Check((bool)retainerReady.Invoke(null, [new long[] { 90 }, 30L, false, 60L])!, "any-retainer mode uses closest ready retainer");
@@ -172,7 +189,7 @@ class Program
             ]
         };
         duplicatedPriorities.Initialize(pi);
-         Check(duplicatedPriorities.Version == 4 && duplicatedPriorities.FateSortOrder.Count == 2
+         Check(duplicatedPriorities.Version == 5 && duplicatedPriorities.FateSortOrder.Count == 2
             && duplicatedPriorities.FateSortOrder[0].Criteria == FateSortCriteria.Distance
             && duplicatedPriorities.FateSortOrder[0].Descending
             && duplicatedPriorities.FateSortOrder[1].Criteria == FateSortCriteria.Level,
@@ -833,6 +850,61 @@ class Program
         sync.Reset();
         api.Snapshot = api.Snapshot with { CurrentFateId = 517, PlayerReady = false };
         Check(!sync.EnsureSynced(selection) && api.Requests == 1, "unloaded player remains gated");
+    }
+
+    static void TestOceanFishingSchedule()
+    {
+        var before = OceanFishingSchedule.GetState(new DateTime(2026, 10, 13, 13, 54, 59, DateTimeKind.Utc), TimeSpan.FromMinutes(5));
+        Check(!before.LaunchEligible && before.Window.StartUtc.Hour == 14, "fishing schedule selects next even UTC hour before lead");
+        var lead = OceanFishingSchedule.GetState(new DateTime(2026, 10, 13, 13, 55, 0, DateTimeKind.Utc), TimeSpan.FromMinutes(5));
+        Check(lead.LaunchEligible && !lead.RegistrationOpen, "fishing departure lead opens before registration");
+        var cutoff = OceanFishingSchedule.GetState(new DateTime(2026, 10, 13, 14, 13, 0, DateTimeKind.Utc), TimeSpan.FromMinutes(5));
+        Check(!cutoff.LaunchEligible && cutoff.RegistrationOpen, "fishing launch cutoff is minute 13");
+        var after = OceanFishingSchedule.GetState(new DateTime(2026, 10, 13, 14, 15, 0, DateTimeKind.Utc), TimeSpan.FromMinutes(5));
+        Check(after.Window.StartUtc.Hour == 16 && !after.RegistrationOpen, "closed window advances by two hours");
+        Check(OceanFishingSchedule.IsHandled(new DateTime(2026, 10, 13, 14, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 10, 13, 14, 0, 0, DateTimeKind.Utc)), "fishing handoff is claimed once per window");
+    }
+
+    static void TestOceanCleanupPolicies()
+    {
+        var safe = new OceanFishingCleanupSnapshot(true, false, false, true, false, false, false,
+            false, false, true, true, false, true, false, false);
+        Check(OceanFishingCleanupPolicy.GetWaitReasons(safe).Count == 0,
+            "Ocean Fishing cleanup allows safe post-duty snapshot");
+        Check(OceanFishingCleanupPolicy.GetWaitReasons(safe with { ResultsVisible = true })
+                .Contains("voyage results still visible"),
+            "Ocean Fishing cleanup waits for results window dismissal");
+
+        var now = DateTime.UtcNow;
+        var status = new WahToolsFeeshStatus(WahToolsStatusAvailability.Available, now, string.Empty,
+            true, "Idle", "", false, false, false, "Idle", "", false, false, "", false, "", false)
+            { Generation = 3 };
+        Check(OceanCleanupConfirmationPolicy.SelectSource(status, now) == OceanCleanupConfirmationSource.WahToolsReflection,
+            "fresh Feesh status enables reflected cleanup confirmation");
+        Check(OceanCleanupConfirmationPolicy.SelectSource(status, now, now) == OceanCleanupConfirmationSource.None,
+            "post-Stop cleanup requires status observed after Stop");
+        Check(OceanCleanupConfirmationPolicy.SelectSource(null, now) == OceanCleanupConfirmationSource.GameStateFallback,
+            "unavailable Feesh status uses guarded game-state fallback");
+        Check(OceanCleanupConfirmationPolicy.GetRequiredDuration(OceanCleanupConfirmationSource.WahToolsReflection) == TimeSpan.FromSeconds(5) &&
+              OceanCleanupConfirmationPolicy.GetRequiredDuration(OceanCleanupConfirmationSource.GameStateFallback) == TimeSpan.FromSeconds(30),
+            "reflected and fallback cleanup require QR-equivalent stable intervals");
+    }
+
+    static void TestOceanFishingPolicy()
+    {
+        Check(OceanFishingPolicy.CanObserveDutyStarted(true, true, false),
+            "Ocean Fishing duty start is accepted for an owned voyage in Ocean territory");
+        Check(!OceanFishingPolicy.CanObserveDutyStarted(true, false, false),
+            "unrelated duty-start event is ignored outside Ocean territory");
+        Check(OceanFishingPolicy.CanObserveDutyCompleted(true, true, false),
+            "completion callback after an observed Ocean duty advances the handoff regardless of callback territory");
+        Check(!OceanFishingPolicy.CanObserveDutyCompleted(true, false, false),
+            "unowned duty completion cannot finish an Ocean voyage");
+        Check(OceanFishingPolicy.Observe(false, false, true, true) == OceanVoyageObservation.DutyCompleted,
+            "persisted duty completion survives territory exit and enters cleanup");
+        Check(OceanFishingPolicy.Observe(false, false, false, true) == OceanVoyageObservation.TerritoryExitedUnconfirmed,
+            "unconfirmed territory exit requires recovery instead of unsafe character return");
     }
 }
 public class Noop : DispatchProxy

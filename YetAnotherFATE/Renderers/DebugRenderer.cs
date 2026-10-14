@@ -165,6 +165,19 @@ public sealed class DebugRenderer
                 automatorChain.RequestAutoRetainerPass();
         }
 
+        if (configuration.OceanFishingEnabled || automatorChain.OceanFishingPhase != AutoRetainerHandoffPhase.Idle)
+        {
+            ImGui.TextWrapped($"Ocean Fishing [{automatorChain.OceanFishingPhase}]: {automatorChain.OceanFishingStatus}");
+            if (automatorChain.OceanFishingPhase == AutoRetainerHandoffPhase.Failed)
+            {
+                if (ImGui.SmallButton("Feesh stopped — return##debug-ocean"))
+                    automatorChain.ConfirmFeeshStoppedAndReturn();
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Discard##debug-ocean"))
+                    automatorChain.AbandonOceanFishingRecovery();
+            }
+        }
+
         if (diagnostics.Candidates.Count == 0)
         {
             ImGui.TextDisabled("No active FATE candidates.");

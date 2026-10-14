@@ -17,8 +17,8 @@ using YetAnotherFATE.Services.Combat.Wrath;
 using YetAnotherFATE.Services.Fates.CombatHelper.Engagement;
 using YetAnotherFATE.Services.Travel;
 using YetAnotherFATE.Services.Fates;
-using YetAnotherFATE.Services.Retainers;
 using YetAnotherFATE.Services.Companions;
+using YetAnotherFATE.Services.Retainers;
 
 namespace YetAnotherFATE.Chains;
 
@@ -37,6 +37,7 @@ public sealed class AutomatorChain : IDisposable
     private readonly AutoRetainerHandoffController? autoRetainerHandoff;
     private readonly IChocoboController? chocoboController;
     private readonly IdleAetheryteReturnController? idleAetheryteReturn;
+    private readonly OceanFishingHandoffController? oceanFishingHandoff;
     private uint territory;
     private readonly ITextAdvanceClient textAdvance;
     private readonly IFateRewardTracker rewardTracker;
@@ -69,6 +70,8 @@ public sealed class AutomatorChain : IDisposable
     public string ChocoboStatus => chocoboController?.Status ?? "Unavailable";
     public string IdleAetheryteReturnStatus => idleAetheryteReturn?.Status ?? "Unavailable";
     public string CombatClearanceStatus => handlers.OfType<ClearingCombatStateHandler>().FirstOrDefault()?.ClearanceStatus ?? "Unavailable";
+    public string OceanFishingStatus => oceanFishingHandoff?.Status ?? "Unavailable";
+    public AutoRetainerHandoffPhase OceanFishingPhase => oceanFishingHandoff?.Phase ?? AutoRetainerHandoffPhase.Idle;
 
     public AutomatorChain(
         ITravelController travelController,
@@ -91,7 +94,8 @@ public sealed class AutomatorChain : IDisposable
         AutomaticTravelPolicy automaticTravel,
         AutoRetainerHandoffController? autoRetainerHandoff = null,
         IChocoboController? chocoboController = null,
-        IdleAetheryteReturnController? idleAetheryteReturn = null)
+        IdleAetheryteReturnController? idleAetheryteReturn = null,
+        OceanFishingHandoffController? oceanFishingHandoff = null)
     {
         this.travelController = travelController;
         this.log = log;
@@ -117,6 +121,7 @@ public sealed class AutomatorChain : IDisposable
         this.autoRetainerHandoff = autoRetainerHandoff;
         this.chocoboController = chocoboController;
         this.idleAetheryteReturn = idleAetheryteReturn;
+        this.oceanFishingHandoff = oceanFishingHandoff;
 
         travelController.PhaseChanged += OnTravelPhaseChanged;
     }
@@ -125,6 +130,8 @@ public sealed class AutomatorChain : IDisposable
     public bool RetryAutoRetainerHandoff() => autoRetainerHandoff?.RetryFailedSession() == true;
     public bool ResumeAutoRetainerHandoff() => autoRetainerHandoff?.ResumeFailedSession() == true;
     public bool AbandonAutoRetainerHandoff() => autoRetainerHandoff?.AbandonFailedSession() == true;
+    public bool ConfirmFeeshStoppedAndReturn() => oceanFishingHandoff?.ConfirmFeeshStoppedAndReturn() == true;
+    public bool AbandonOceanFishingRecovery() => oceanFishingHandoff?.AbandonFailedSession() == true;
 
     public unsafe bool CanStartAutoRetainerHandoff()
     {
@@ -146,6 +153,8 @@ public sealed class AutomatorChain : IDisposable
         var fateManager = FateManager.Instance();
         return fateManager == null || fateManager->CurrentFate == null;
     }
+
+    public unsafe bool CanStartOceanFishingHandoff() => CanStartAutoRetainerHandoff();
 
     public bool CanResumeAfterAutoRetainerHandoff()
         => clientState.IsLoggedIn && objectTable.LocalPlayer is { CurrentHp: > 0 } &&
@@ -182,6 +191,15 @@ public sealed class AutomatorChain : IDisposable
         context.TransitionTo(AutomatorState.SelectingFate, "AutoRetainer handoff complete", log);
     }
 
+    public void ResumeAfterExternalHandoff(string reason)
+    {
+        if (!configuration.AutomatorEnabled)
+            return;
+        territory = clientState.TerritoryType;
+        context.Reset(log);
+        context.TransitionTo(AutomatorState.SelectingFate, reason, log);
+    }
+
     public void Tick()
     {
         if (disposed)
@@ -192,6 +210,15 @@ public sealed class AutomatorChain : IDisposable
         rewardTracker.SynchronizeSession();
         automaticTravel.Synchronize();
         rotatingHandler?.Rotation.SynchronizeSettings();
+        if (autoRetainerHandoff?.HasSession == true)
+        {
+            autoRetainerHandoff.Tick(this);
+            return;
+        }
+        if (oceanFishingHandoff?.ShouldDispatchChainedRetainer == true && autoRetainerHandoff?.Tick(this) == true)
+            return;
+        if (oceanFishingHandoff?.Tick(this, autoRetainerHandoff?.HasSession == true) == true)
+            return;
         if (autoRetainerHandoff?.Tick(this) == true)
             return;
         if (objectTable.LocalPlayer == null || condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51])

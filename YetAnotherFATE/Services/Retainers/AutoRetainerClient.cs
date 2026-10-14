@@ -6,6 +6,7 @@ using System.Reflection;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
+using Newtonsoft.Json.Linq;
 using YetAnotherFATE.Data.Retainers;
 
 namespace YetAnotherFATE.Services.Retainers;
@@ -132,6 +133,40 @@ public sealed class AutoRetainerClient : IAutoRetainerClient
                 ex.GetType().Name);
             return false;
         }
+    }
+
+    public bool TryGetRegisteredCharacters(out IReadOnlyList<AutoRetainerCharacter> characters)
+    {
+        try
+        {
+            characters = (getRegisteredCharacters.InvokeFunc() ?? new List<ulong>())
+                .Select(cid => (Cid: cid, Data: getOfflineCharacterData.InvokeFunc(cid)))
+                .Where(x => x.Data is not null)
+                .Select(x => new AutoRetainerCharacter(x.Cid,
+                    ReadCharacterString(x.Data!, "Name"), ReadCharacterString(x.Data!, "World")))
+                .Where(x => x.ContentId != 0 && !string.IsNullOrWhiteSpace(x.Name) && !string.IsNullOrWhiteSpace(x.World))
+                .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.World, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "AutoRetainer character roster IPC unavailable");
+            characters = Array.Empty<AutoRetainerCharacter>();
+            return false;
+        }
+    }
+
+    private static string ReadCharacterString(object data, string name)
+    {
+        if (data is JObject json && json.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out var token) &&
+            token.Type is not JTokenType.Null and not JTokenType.Undefined)
+            return token.ToString();
+
+        var type = data.GetType();
+        return type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance)?.GetValue(data)?.ToString() ??
+               type.GetField(name, BindingFlags.Public | BindingFlags.Instance)?.GetValue(data)?.ToString() ?? string.Empty;
     }
 
     public bool TryEnableSinglePass(AutoRetainerMode mode)

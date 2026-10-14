@@ -61,6 +61,14 @@ public class Configuration : IPluginConfiguration
     public int AutoRetainerReadinessIntervalSeconds { get; set; } = 60;
     public int AutoRetainerRetryCooldownSeconds { get; set; } = 120;
     public AutoRetainerHandoffSession? AutoRetainerHandoff { get; set; }
+    public bool OceanFishingEnabled { get; set; }
+    public int OceanFishingLeadMinutes { get; set; } = 5;
+    public OceanFishingCharacterMode OceanFishingCharacterMode { get; set; } = OceanFishingCharacterMode.SelectedCharacter;
+    public ulong OceanFishingCharacterContentId { get; set; }
+    public string OceanFishingCharacterName { get; set; } = string.Empty;
+    public string OceanFishingCharacterWorld { get; set; } = string.Empty;
+    public DateTime? LastHandledOceanFishingWindowUtc { get; set; }
+    public OceanFishingHandoffSession? OceanFishingHandoff { get; set; }
 
     [NonSerialized]
     private IDalamudPluginInterface? pluginInterface;
@@ -105,6 +113,17 @@ public class Configuration : IPluginConfiguration
         else if (!Enum.IsDefined(ChocoboStance))
         {
             ChocoboStance = ChocoboStance.Disabled;
+            Save();
+        }
+        OceanFishingLeadMinutes = Math.Clamp(OceanFishingLeadMinutes, 0, 30);
+        if (!Enum.IsDefined(OceanFishingCharacterMode))
+        {
+            OceanFishingCharacterMode = OceanFishingCharacterMode.SelectedCharacter;
+            Save();
+        }
+        if (Version < 5)
+        {
+            Version = 5;
             Save();
         }
     }

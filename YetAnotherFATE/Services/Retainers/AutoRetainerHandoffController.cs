@@ -27,6 +27,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
     private DateTimeOffset nextReadinessScan = DateTimeOffset.MinValue;
     private DateTimeOffset nextReturnAttempt = DateTimeOffset.MinValue;
     private bool manualPassRequested;
+    private bool manualPassSuppressResume;
     private bool completionEventReceived;
     private bool disposed;
     private AutoRetainerReadinessSnapshot lastReadiness;
@@ -64,11 +65,14 @@ public sealed class AutoRetainerHandoffController : IDisposable
 
     public AutoRetainerReadinessSnapshot LastReadiness => lastReadiness;
 
+    public bool HasSession => configuration.AutoRetainerHandoff is not null;
+    public bool HasPendingManualPass => manualPassRequested;
+
     public string Status { get; private set; } = "Disabled";
 
     public bool IsActive => configuration.AutoRetainerHandoff is not null || manualPassRequested || lastReadiness.WorkReady;
 
-    public void RequestManualPass()
+    public void RequestManualPass(bool resumeAutomator = true)
     {
         if (configuration.AutoRetainerHandoff?.Phase == AutoRetainerHandoffPhase.Failed)
         {
@@ -77,7 +81,17 @@ public sealed class AutoRetainerHandoffController : IDisposable
         }
 
         manualPassRequested = true;
+        manualPassSuppressResume = !resumeAutomator;
         Status = "Manual AutoRetainer pass pending safe boundary";
+    }
+
+    public void CancelPendingManualPass()
+    {
+        if (configuration.AutoRetainerHandoff is not null)
+            return;
+        manualPassRequested = false;
+        manualPassSuppressResume = false;
+        Status = "Pending manual AutoRetainer pass cancelled";
     }
 
     public bool RetryFailedSession()
@@ -509,7 +523,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
             OriginalPosition = player.Position,
             OriginalCharacterName = name,
             OriginalWorldName = world,
-            WasAutomatorEnabled = configuration.AutomatorEnabled,
+            WasAutomatorEnabled = configuration.AutomatorEnabled && !manualPassSuppressResume,
             Mode = configuration.AutoRetainerMode,
             StartedAtUtc = now,
             PhaseStartedAtUtc = now,
@@ -522,6 +536,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
         chain.PrepareForExternalHandoff("AutoRetainer handoff starting");
         safeLocationRoute.Reset();
         manualPassRequested = false;
+        manualPassSuppressResume = false;
         Status = "Preparing safe aetheryte location before AutoRetainer";
     }
 

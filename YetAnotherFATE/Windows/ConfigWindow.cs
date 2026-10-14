@@ -11,6 +11,7 @@ using YetAnotherFATE.Data.Retainers;
 using YetAnotherFATE.Services.Combat;
 using Dalamud.Plugin.Services;
 using YetAnotherFATE.Services.Zone;
+using YetAnotherFATE.Services.Retainers;
 
 namespace YetAnotherFATE.Windows;
 
@@ -23,6 +24,7 @@ public class ConfigWindow : Window, IDisposable
         Companion,
         Display,
         FateSelection,
+        OceanFishing,
         Teleport,
         ZoneRotation,
     }
@@ -31,6 +33,7 @@ public class ConfigWindow : Window, IDisposable
     private readonly Configuration configuration;
     private readonly ICombatPluginRegistry combatPlugins;
     private readonly IZoneService zones;
+    private readonly IAutoRetainerClient autoRetainer;
     private (uint Id, string Name)[]? rotationZones;
     private bool initialRefreshDone;
     private ConfigSection selectedSection = ConfigSection.Display;
@@ -38,7 +41,8 @@ public class ConfigWindow : Window, IDisposable
     // We give this window a constant ID using ###.
     // This allows for labels to be dynamic, like "{FPS Counter}fps###XYZ counter window",
     // and the window ID will always be "###XYZ counter window" for ImGui
-    public ConfigWindow(Configuration configuration, ICombatPluginRegistry combatPlugins, IZoneService zones) : base("Yet Another FATE Config")
+    public ConfigWindow(Configuration configuration, ICombatPluginRegistry combatPlugins, IZoneService zones,
+        IAutoRetainerClient autoRetainer) : base("Yet Another FATE Config")
     {
         Flags = ImGuiWindowFlags.NoCollapse;
 
@@ -53,6 +57,7 @@ public class ConfigWindow : Window, IDisposable
         this.configuration = configuration;
         this.combatPlugins = combatPlugins;
         this.zones = zones;
+        this.autoRetainer = autoRetainer;
     }
 
     public void Dispose() { }
@@ -73,6 +78,7 @@ public class ConfigWindow : Window, IDisposable
             DrawSectionButton("Companion", ConfigSection.Companion);
             DrawSectionButton("FATE Display", ConfigSection.Display);
             DrawSectionButton("FATE Selection", ConfigSection.FateSelection);
+            DrawSectionButton("Ocean Fishing", ConfigSection.OceanFishing);
             DrawSectionButton("Teleport", ConfigSection.Teleport);
             DrawSectionButton("Zone Rotation", ConfigSection.ZoneRotation);
         }
@@ -97,6 +103,9 @@ public class ConfigWindow : Window, IDisposable
                     break;
                 case ConfigSection.FateSelection:
                     DrawFateSection();
+                    break;
+                case ConfigSection.OceanFishing:
+                    DrawOceanFishingSection();
                     break;
                 case ConfigSection.Teleport:
                     DrawTeleportSection();
@@ -230,6 +239,61 @@ public class ConfigWindow : Window, IDisposable
         DrawIntegerSetting("Retry cooldown (s)", configuration.AutoRetainerRetryCooldownSeconds, 30, 1800,
             value => configuration.AutoRetainerRetryCooldownSeconds = value);
         ImGui.TextWrapped("YAF returns to the nearest unlocked main aetheryte before every YAF-started AutoRetainer pass. Teleport, gil, Twist of Fate, and safety restrictions can hold the handoff. YAF resumes after returning to the original character.");
+    }
+
+    private void DrawOceanFishingSection()
+    {
+        ImGui.TextUnformatted("Scheduled Ocean Fishing");
+        ImGui.Separator();
+        var enabled = configuration.OceanFishingEnabled;
+        if (ImGui.Checkbox("Schedule one Ocean Fishing voyage", ref enabled))
+        {
+            configuration.OceanFishingEnabled = enabled;
+            configuration.Save();
+        }
+        ImGui.TextWrapped("YAF prepares a safe departure, switches to the selected AutoRetainer character, requests one WahTools Feesh voyage, then returns to the farming character and zone. Active FATEs and retainer passes are never interrupted.");
+        DrawIntegerSetting("Preparation lead (minutes)", configuration.OceanFishingLeadMinutes, 0, 30,
+            value => configuration.OceanFishingLeadMinutes = value);
+
+        ImGui.SetNextItemWidth(ControlWidth + 50f);
+        if (ImGui.BeginCombo("Fishing character mode", configuration.OceanFishingCharacterMode.ToString()))
+        {
+            foreach (var mode in Enum.GetValues<OceanFishingCharacterMode>())
+            {
+                if (ImGui.Selectable(mode.ToString(), mode == configuration.OceanFishingCharacterMode))
+                {
+                    configuration.OceanFishingCharacterMode = mode;
+                    configuration.Save();
+                }
+            }
+            ImGui.EndCombo();
+        }
+
+        if (configuration.OceanFishingCharacterMode == OceanFishingCharacterMode.SelectedCharacter &&
+            autoRetainer.TryGetRegisteredCharacters(out var characters))
+        {
+            var selected = characters.FirstOrDefault(x => x.ContentId == configuration.OceanFishingCharacterContentId);
+            var label = selected is null ? "Select registered character" : $"{selected.Name}@{selected.World}";
+            ImGui.SetNextItemWidth(ControlWidth + 120f);
+            if (ImGui.BeginCombo("Fishing character", label))
+            {
+                foreach (var character in characters)
+                {
+                    if (ImGui.Selectable($"{character.Name}@{character.World}##{character.ContentId}",
+                            character.ContentId == configuration.OceanFishingCharacterContentId))
+                    {
+                        configuration.OceanFishingCharacterContentId = character.ContentId;
+                        configuration.OceanFishingCharacterName = character.Name;
+                        configuration.OceanFishingCharacterWorld = character.World;
+                        configuration.Save();
+                    }
+                }
+                ImGui.EndCombo();
+            }
+        }
+        else if (configuration.OceanFishingCharacterMode == OceanFishingCharacterMode.SelectedCharacter)
+            ImGui.TextWrapped("AutoRetainer character list unavailable; selected-character scheduling is paused.");
+        ImGui.TextWrapped("Registration opens every even UTC hour for 15 minutes. YAF claims the window once and will not retry an ambiguous Feesh launch. Launch cutoff is minute 13; an unfinished/ambiguous handoff requires manual recovery.");
     }
 
     private void DrawDisplaySection()
