@@ -1,5 +1,7 @@
 using System;
 using System.Linq;
+using System.Numerics;
+using Dalamud.Game.ClientState.Objects.Types;
 using YetAnotherFATE.Config;
 using YetAnotherFATE.Data.Automator;
 using YetAnotherFATE.Data.Combat;
@@ -57,6 +59,10 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
     private bool postCombatCleaned;
     private bool collectionInteractionOwned;
     private DateTimeOffset outsideFateSince = DateTimeOffset.MinValue;
+    private readonly EscortLeapfrogTracker escortTracker = new();
+    private DateTimeOffset nextEscortRetryAt = DateTimeOffset.MinValue;
+    private DateTimeOffset nextEscortDiagnosticAt = DateTimeOffset.MinValue;
+    private Vector3? lastEscortDestination;
     private static readonly TimeSpan OutsideFateGrace = TimeSpan.FromSeconds(3);
     private const float EscortAnchorParticipationDistance = 30f;
 
@@ -112,6 +118,7 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         lastObservedFate = default;
         collectionInteractionOwned = postCombatCleaned = false;
         outsideFateSince = DateTimeOffset.MinValue;
+        ClearEscortPositioning("participation handler reset");
         levelSyncService.Reset();
     }
 
@@ -140,6 +147,7 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
 
         if (condition[ConditionFlag.Unconscious] || objectTable.LocalPlayer?.CurrentHp == 0)
         {
+            ClearEscortPositioning("player unconscious");
             textAdvance.Disable();
             combatHandler.Reset("Player unconscious");
             return AutomatorStateHandlerResult.Transition(AutomatorState.Recovering, "Player unconscious; waiting for recovery");
@@ -148,6 +156,7 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         var selection = context.CurrentSelection;
         if (selection == null)
         {
+            ClearEscortPositioning("selection missing");
             levelSyncService.Reset();
             textAdvance.Disable();
             return AutomatorStateHandlerResult.Transition(AutomatorState.PostFate, "Selection missing in participating state");
@@ -166,6 +175,7 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
             context.EndedFateId = selection.Value.Fate.FateId;
             clearanceTargeter?.CaptureEndedFate(selection.Value.Fate);
             StopFateOffense("FATE reached terminal state");
+            ClearEscortPositioning("FATE ended");
             var completion = fateRepository.TryGetTerminalFate(selection.Value.Fate.FateId, out var terminal)
                 ? completionTracker.RecordTerminal(terminal)
                 : completionTracker.RecordMissing(lastObservedFate);
@@ -191,6 +201,8 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         if (lastObservedFate.FateId != 0 && !IsSameOccurrence(lastObservedFate, observedFate))
             outsideFateSince = DateTimeOffset.MinValue;
         lastObservedFate = observedFate;
+        if (lastObservedFate.FateRule != FateRule.Escort)
+            ClearEscortPositioning("selected FATE is not an escort");
         completionTracker.Observe(lastObservedFate);
         if (!IsAtFate(lastObservedFate, objectTable.LocalPlayer.Position))
         {
@@ -296,9 +308,13 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
         var snapshot = combatHandler.Execute(selection.Value);
         if (snapshot == null)
         {
+            if (lastObservedFate.FateRule == FateRule.Escort)
+                return TickEscortPositioning(selection.Value, lastObservedFate);
             EmitWaitingReminder(selection.Value.Fate.FateId);
             return AutomatorStateHandlerResult.None("No fate targets available");
         }
+
+        SuspendEscortPositioning("combat target available");
 
         EmitTargetStatus(snapshot.Value);
 
@@ -423,6 +439,93 @@ public sealed class ParticipatingInFateStateHandler : IAutomatorStateHandler
     private static bool IsSameOccurrence(ActiveFate current, ActiveFate selected)
         => current.FateId == selected.FateId && current.TerritoryId == selected.TerritoryId &&
            (current.StartTimeEpoch == 0 || selected.StartTimeEpoch == 0 || current.StartTimeEpoch == selected.StartTimeEpoch);
+
+    private AutomatorStateHandlerResult TickEscortPositioning(FateSelection selection, ActiveFate fate)
+    {
+        if (condition[ConditionFlag.InCombat])
+        {
+            SuspendEscortPositioning("combat active");
+            return AutomatorStateHandlerResult.None("Escort positioning suspended during combat");
+        }
+
+        var player = objectTable.LocalPlayer;
+        if (player == null) return AutomatorStateHandlerResult.Wait("Waiting for player before escort positioning");
+
+        var anchor = objectTable.Cast<IGameObject>()
+            .OfType<IBattleNpc>()
+            .Where(npc => FateTargetPolicy.IsValidTravelAnchor(npc, fate) &&
+                          FateTargetPolicy.IsFateNpcIdentity(npc.GameObjectId, npc.EntityId, fate.MotivationNpc, fate.ObjectiveNpc))
+            .OrderBy(npc => FlatDistance(npc.Position, player.Position))
+            .FirstOrDefault();
+
+        var anchorPosition = anchor?.Position ?? fate.Center;
+        var anchorId = anchor?.GameObjectId ?? 0;
+        var now = DateTimeOffset.UtcNow;
+        var destination = escortTracker.Tick(fate, anchorId, anchorPosition, player.Position, now);
+        if (now >= nextEscortDiagnosticAt)
+        {
+            var anchorSource = anchor == null ? "FATE center" : $"NPC object={anchor.GameObjectId} entity={anchor.EntityId}";
+            log.Debug("Escort positioning: fate={FateId} anchor={AnchorSource} anchorPos=({AnchorX:F1},{AnchorY:F1},{AnchorZ:F1}) playerPos=({PlayerX:F1},{PlayerY:F1},{PlayerZ:F1}) heading=({HeadingX:F2},{HeadingZ:F2}) displacement={Displacement:F2}y playerOffset={PlayerOffset:F1}y state={State}",
+                fate.FateId, anchorSource, anchorPosition.X, anchorPosition.Y, anchorPosition.Z,
+                player.Position.X, player.Position.Y, player.Position.Z,
+                escortTracker.Heading.X, escortTracker.Heading.Y, escortTracker.LastSampleDisplacement,
+                escortTracker.PlayerHeadingOffset, escortTracker.Status);
+            nextEscortDiagnosticAt = now.AddSeconds(5);
+        }
+        if (destination is not { } target)
+        {
+            if (travelController.CurrentJob?.Kind == TravelRequestKind.EscortPositioning)
+                travelController.Cancel("Escort stopped or player caught up", TravelRequestKind.EscortPositioning);
+            lastEscortDestination = null;
+            return AutomatorStateHandlerResult.None($"Escort positioning: {escortTracker.Status}");
+        }
+
+        if (travelController.CurrentJob is { } current && current.Kind != TravelRequestKind.EscortPositioning)
+        {
+            SuspendEscortPositioning("higher-priority travel active");
+            return AutomatorStateHandlerResult.None("Escort positioning yielded to higher-priority travel");
+        }
+
+        if (travelController.CurrentJob == null && travelController.Phase == TravelPhase.Failed &&
+            DateTimeOffset.UtcNow < nextEscortRetryAt)
+            return AutomatorStateHandlerResult.None("Escort positioning waiting for navigation retry backoff");
+
+        var retryFailedLeg = travelController.CurrentJob == null && travelController.Phase == TravelPhase.Failed &&
+                             DateTimeOffset.UtcNow >= nextEscortRetryAt;
+        if (lastEscortDestination is not { } previous || FlatDistance(previous, target) >= 1f || retryFailedLeg)
+        {
+            var movementSelection = selection with
+            {
+                Fate = fate,
+                Destination = target,
+                ShouldTeleport = false,
+                PreferredAetheryteId = null,
+                Teleport = default
+            };
+            travelController.RequestTravel(movementSelection, TravelRequestKind.EscortPositioning, 2.5f);
+            lastEscortDestination = target;
+            nextEscortRetryAt = DateTimeOffset.UtcNow.AddSeconds(5);
+            log.Debug("Automator: escort leapfrog leg started fate={FateId} anchor={AnchorId} heading=({HeadingX:F2},{HeadingZ:F2}) destination=({X:F1},{Y:F1},{Z:F1})",
+                fate.FateId, anchorId, escortTracker.Heading.X, escortTracker.Heading.Y, target.X, target.Y, target.Z);
+        }
+
+        return AutomatorStateHandlerResult.None("Moving ahead of escort; destination held for this leg");
+    }
+
+    private void SuspendEscortPositioning(string reason)
+    {
+        if (travelController.CurrentJob?.Kind == TravelRequestKind.EscortPositioning)
+            travelController.Cancel(reason, TravelRequestKind.EscortPositioning);
+        escortTracker.SuspendLeg();
+        lastEscortDestination = null;
+    }
+
+    private void ClearEscortPositioning(string reason)
+    {
+        SuspendEscortPositioning(reason);
+        escortTracker.Reset();
+        nextEscortRetryAt = DateTimeOffset.MinValue;
+    }
 
     private unsafe bool IsAtFate(ActiveFate fate, System.Numerics.Vector3 position)
     {

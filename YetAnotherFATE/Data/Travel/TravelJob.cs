@@ -21,6 +21,7 @@ public enum TravelRequestKind
 {
     Automatic,
     DebugForceRun,
+    EscortPositioning,
 }
 
 public sealed record TravelJob(

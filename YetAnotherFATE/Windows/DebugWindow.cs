@@ -20,5 +20,9 @@ public sealed class DebugWindow : Window, IDisposable
 
     public void Dispose() { }
 
+    public override void PreDraw() => YafTheme.Push();
+
+    public override void PostDraw() => YafTheme.Pop();
+
     public override void Draw() => renderer.Draw();
 }

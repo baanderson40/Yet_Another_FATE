@@ -67,7 +67,12 @@ class Program
         var services = new ServiceCollection();
         pluginType.GetMethod("BootstrapServices", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(plugin, [services]);
         using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
+        var territoryRouteRegistration = services.Single(d => d.ServiceType == typeof(TerritoryReturnRoute));
+        Check(territoryRouteRegistration.Lifetime == ServiceLifetime.Transient &&
+              !ReferenceEquals(provider.GetRequiredService<TerritoryReturnRoute>(), provider.GetRequiredService<TerritoryReturnRoute>()),
+            "AutoRetainer and Ocean Fishing handoffs receive isolated territory-return route state");
         var types = pluginType.Assembly.GetTypes();
+        TestStableWindowIdentity();
         int constructors = 0;
         foreach (var descriptor in services)
         {
@@ -106,6 +111,8 @@ class Program
         Check(config.AutomatorEnabled && rewards.RunUntil == null && !rewards.PendingStop, "unlimited UI start resets run target");
 
         Check(new Configuration().FateMinTimeRemainingSeconds == 120, "reference minimum time default");
+        Check(new Configuration().ThemePreset == "Fiery Ocean", "YAF theme defaults to the reference palette");
+        TestYafThemePresets();
         Check(!new Configuration().OceanFishingEnabled && new Configuration().OceanFishingLeadMinutes == 5,
             "ocean fishing is opt-in with five-minute preparation lead");
         var clampedFishingLead = new Configuration { OceanFishingLeadMinutes = 99 };
@@ -144,13 +151,13 @@ class Program
         Check(FateTargetPolicy.GetForlornPriority(1) == 0, "ordinary NameId has no Forlorn priority");
         var pi = DispatchProxy.Create<IDalamudPluginInterface, Noop>();
         var migrated = new Configuration { FateMinTimeRemainingSeconds = 240 };
-         migrated.Initialize(pi); Check(migrated.Version == 5 && migrated.FateMinTimeRemainingSeconds == 120 && migrated.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "old erroneous default migrated");
+         migrated.Initialize(pi); Check(migrated.Version == 6 && migrated.FateMinTimeRemainingSeconds == 120 && migrated.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "old erroneous default migrated");
         var custom = new Configuration { FateMinTimeRemainingSeconds = 75 };
         custom.Initialize(pi); Check(custom.FateMinTimeRemainingSeconds == 75, "custom minimum retained");
          var explicit240 = new Configuration { Version = 1, FateMinTimeRemainingSeconds = 240 };
          explicit240.Initialize(pi); Check(explicit240.FateMinTimeRemainingSeconds == 240, "versioned choice retained");
          var invalidCompanion = new Configuration { Version = 3, ChocoboStance = (YetAnotherFATE.Data.Companions.ChocoboStance)99 };
-          invalidCompanion.Initialize(pi); Check(invalidCompanion.Version == 5 && invalidCompanion.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "invalid chocobo stance normalized");
+           invalidCompanion.Initialize(pi); Check(invalidCompanion.Version == 6 && invalidCompanion.ChocoboStance == YetAnotherFATE.Data.Companions.ChocoboStance.Disabled, "invalid chocobo stance normalized");
          TestChocoboController(log);
          TestNearestAetheryteReturnRoute();
          TestCombatClearanceTargetPolicy();
@@ -158,7 +165,6 @@ class Program
          TestOceanFishingSchedule();
          TestOceanFishingPolicy();
          TestOceanCleanupPolicies();
-        var retainerReady = typeof(AutoRetainerClient).GetMethod("IsRetainerReady", BindingFlags.Static | BindingFlags.NonPublic)!;
         var readCharacterString = typeof(AutoRetainerClient).GetMethod("ReadCharacterString", BindingFlags.Static | BindingFlags.NonPublic)!;
         var jObjectType = Type.GetType("Newtonsoft.Json.Linq.JObject, Newtonsoft.Json", throwOnError: true)!;
         var parseJson = jObjectType.GetMethods(BindingFlags.Public | BindingFlags.Static)
@@ -168,9 +174,26 @@ class Program
         Check((string)readCharacterString.Invoke(null, [offlineCharacter, "Name"])! == "Fishing Alt" &&
               (string)readCharacterString.Invoke(null, [offlineCharacter, "World"])! == "Excalibur",
             "AutoRetainer IPC object roster extracts Newtonsoft JSON character fields");
-        Check((bool)retainerReady.Invoke(null, [new long[] { 30, 45 }, 30L, true, 60L])!, "all retainers honor advance threshold");
-        Check(!(bool)retainerReady.Invoke(null, [new long[] { 30, 90 }, 30L, true, 60L])!, "wait-for-all blocks on late retainer");
-        Check((bool)retainerReady.Invoke(null, [new long[] { 90 }, 30L, false, 60L])!, "any-retainer mode uses closest ready retainer");
+        Check(AutoRetainerReadinessPolicy.IsRetainerReady(true, true, [30, 45], 30, true, 60),
+            "all selected retainers honor advance threshold");
+        Check(!AutoRetainerReadinessPolicy.IsRetainerReady(true, true, [30, 90], 30, true, 60),
+            "wait-for-all blocks on late retainer");
+        Check(AutoRetainerReadinessPolicy.IsRetainerReady(true, true, [90], 30, false, 60),
+            "any-retainer mode uses closest ready retainer");
+        Check(!AutoRetainerReadinessPolicy.IsRetainerReady(true, false, [], 0, false, 60),
+            "empty selected venture set cannot appear ready from a zero IPC timer");
+        Check(!AutoRetainerReadinessPolicy.IsRetainerReady(false, true, [0], 0, false, 60),
+            "disabled AutoRetainer character cannot appear ready");
+        var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var readRemaining = typeof(AutoRetainerClient).GetMethod("ReadRetainerRemaining", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var emptyVentureData = parseJson.Invoke(null, [$"{{\"RetainerData\":[{{\"Name\":\"R1\",\"HasVenture\":false,\"VentureEndsAt\":{nowUnix}}}]}}"])!;
+        var remainingWithoutVenture = (IReadOnlyList<long>)readRemaining.Invoke(null,
+            [emptyVentureData, new HashSet<string> { "R1" }, nowUnix])!;
+        Check(remainingWithoutVenture.Count == 0,
+            "JObject retainer data excludes selected retainers without active ventures");
+        Check(AutoRetainerReadinessPolicy.CanStartAutomaticPass(DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddSeconds(30)) == false &&
+              AutoRetainerReadinessPolicy.CanStartAutomaticPass(DateTimeOffset.UtcNow.AddSeconds(31), DateTimeOffset.UtcNow.AddSeconds(30)),
+            "automatic AutoRetainer handoff observes its cooldown");
         var memberReader = typeof(AutoRetainerClient).GetMethod("ReadMember", BindingFlags.Static | BindingFlags.NonPublic)!;
         var fixture = new RetainerConfigurationFixture();
         Check((long)memberReader.MakeGenericMethod(typeof(long)).Invoke(null, [fixture.GetType(), fixture, "AdvanceTimer", 0L])! == 60,
@@ -189,7 +212,7 @@ class Program
             ]
         };
         duplicatedPriorities.Initialize(pi);
-         Check(duplicatedPriorities.Version == 5 && duplicatedPriorities.FateSortOrder.Count == 2
+         Check(duplicatedPriorities.Version == 6 && duplicatedPriorities.FateSortOrder.Count == 2
             && duplicatedPriorities.FateSortOrder[0].Criteria == FateSortCriteria.Distance
             && duplicatedPriorities.FateSortOrder[0].Descending
             && duplicatedPriorities.FateSortOrder[1].Criteria == FateSortCriteria.Level,
@@ -270,6 +293,7 @@ class Program
         Check((DateTimeOffset)typeof(ParticipatingInFateStateHandler).GetField("collectionEndedAt", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(participant)! == default, "participant reset removes stale grace");
         TestDeathReturn(log, pi);
         TestTerritoryReturn();
+        TestEscortLeapfrogTracker();
         TestCityDeathReturn(log);
         RotationTests.Run();
         Console.WriteLine($"PASS: {checks} integration assertions against compiled production assembly");
@@ -600,6 +624,24 @@ class Program
         }
     }
 
+    static void TestYafThemePresets()
+    {
+        var themeType = typeof(Plugin).Assembly.GetType("YetAnotherFATE.Windows.YafTheme", throwOnError: true)!;
+        var names = (string[])themeType.GetProperty("PresetNames", BindingFlags.Static | BindingFlags.Public)!.GetValue(null)!;
+        var setPreset = themeType.GetMethod("SetPreset", BindingFlags.Static | BindingFlags.Public)!;
+        var currentPreset = themeType.GetProperty("CurrentPreset", BindingFlags.Static | BindingFlags.Public)!;
+        Check(names.SequenceEqual(["Fiery Ocean", "Dark Sunset", "Summer Fun"]),
+            "YAF exposes all three Tome-inspired appearance presets");
+        foreach (var name in names)
+        {
+            setPreset.Invoke(null, [name]);
+            Check((string)currentPreset.GetValue(null)! == name, $"YAF theme selects {name}");
+        }
+        setPreset.Invoke(null, ["unknown theme"]);
+        Check((string)currentPreset.GetValue(null)! == "Fiery Ocean", "unknown YAF theme falls back safely");
+        setPreset.Invoke(null, ["Fiery Ocean"]);
+    }
+
     static void TestTerritoryReturn()
     {
         var now = DateTimeOffset.UtcNow;
@@ -631,6 +673,93 @@ class Program
         missingRoute.Tick(100, destination, 200, true, now);
         Check(missingRoute.Tick(100, destination, 200, true, now.AddSeconds(1)) == TerritoryReturnResult.Failed,
             "missing origin route fails without resuming in wrong territory");
+
+        ZoneInfo? recoverableZone = null;
+        var recoverableRoute = new TerritoryReturnRoute(Stub<IZoneService>((m, a) => recoverableZone), executor);
+        recoverableRoute.Tick(100, destination, 200, true, now);
+        Check(recoverableRoute.Tick(100, destination, 200, true, now.AddSeconds(1)) == TerritoryReturnResult.Failed,
+            "route failure is held until an explicit recovery reset");
+        recoverableZone = zone;
+        recoverableRoute.Reset();
+        recoverableRoute.Tick(100, destination, 200, true, now.AddSeconds(2));
+        Check(recoverableRoute.Tick(100, destination, 200, true, now.AddSeconds(3)) == TerritoryReturnResult.Waiting &&
+              issued == 1,
+            "manual recovery reset starts a fresh origin return attempt");
+    }
+
+    static void TestStableWindowIdentity()
+    {
+        var formatter = typeof(YetAnotherFATE.Windows.MainWindow).GetMethod("FormatWindowTitle",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        var firstBuild = (string)formatter.Invoke(null, ["2026.10.21.1"])!;
+        var nextBuild = (string)formatter.Invoke(null, ["2026.10.21.2"])!;
+        Check(firstBuild.StartsWith("Yet Another FATE [DEV 2026.10.21.1]", StringComparison.Ordinal) &&
+              nextBuild.StartsWith("Yet Another FATE [DEV 2026.10.21.2]", StringComparison.Ordinal),
+            "main window keeps the development build visible in its title");
+        Check(firstBuild.Split("###", StringSplitOptions.None)[1] == "YetAnotherFATE.Main" &&
+              firstBuild.Split("###", StringSplitOptions.None)[1] == nextBuild.Split("###", StringSplitOptions.None)[1],
+            "main window ImGui identity remains stable across development builds");
+    }
+
+    static void TestEscortLeapfrogTracker()
+    {
+        var tracker = new EscortLeapfrogTracker();
+        var fate = new ActiveFate(700, "Escort test", 20, 100, Vector3.Zero, 50, 0, false,
+            TimeSpan.FromMinutes(5), Dalamud.Game.ClientState.Fates.FateState.Running, 0, "", "", 0, 0,
+            false, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        fate = fate with { StartTimeEpoch = 122 };
+        var now = DateTimeOffset.UtcNow;
+        Check(tracker.Tick(fate, 77, Vector3.Zero, new Vector3(-10, 0, 0), now) == null,
+            "escort tracker observes before predicting a heading");
+        var firstLeg = tracker.Tick(fate, 77, new Vector3(2, 0, 0), new Vector3(-10, 0, 0), now.AddSeconds(1));
+        Check(firstLeg is { } first && MathF.Abs(first.X - 12) < 0.1f,
+            "escort tracker commits a forward leg once player is meaningfully behind");
+        var heldLeg = tracker.Tick(fate, 77, new Vector3(4, 0, 0), new Vector3(-8, 0, 0), now.AddSeconds(2));
+        Check(heldLeg == firstLeg, "escort leg destination remains fixed while anchor advances");
+        Check(tracker.Tick(fate, 77, new Vector3(6, 0, 0), firstLeg!.Value, now.AddSeconds(3)) == null,
+            "escort tracker waits after reaching its forward destination");
+        Check(tracker.Tick(fate, 77, new Vector3(12, 0, 0), firstLeg.Value, now.AddSeconds(4)) == null,
+            "escort tracker lets the escort approach and pass before moving again");
+        var nextLeg = tracker.Tick(fate, 77, new Vector3(20, 0, 0), firstLeg.Value, now.AddSeconds(5));
+        Check(nextLeg is { } next && next.X > firstLeg.Value.X,
+            "escort tracker starts the next leapfrog leg only after player falls behind");
+        Check(tracker.Tick(fate with { StartTimeEpoch = 123 }, 77, new Vector3(21, 0, 0), firstLeg.Value, now.AddSeconds(6)) == null,
+            "escort tracker resets motion history across FATE occurrences");
+
+        foreach (var frequency in new[] { 30, 60, 144 })
+        {
+            var highRateTracker = new EscortLeapfrogTracker();
+            highRateTracker.Tick(fate, 77, Vector3.Zero, new Vector3(-10, 0, 0), now);
+            Vector3? highRateLeg = null;
+            var ticks = (int)Math.Ceiling(frequency * 0.9);
+            for (var tick = 1; tick <= ticks; tick++)
+            {
+                var elapsed = tick / (double)frequency;
+                highRateLeg = highRateTracker.Tick(fate, 77, new Vector3((float)(elapsed * 2.5), 0, 0),
+                    new Vector3(-10, 0, 0), now.AddSeconds(elapsed));
+            }
+            Check(highRateLeg != null && highRateTracker.Heading.X > 0.9f,
+                $"escort tracker accumulates real walking motion at {frequency} updates per second");
+        }
+
+        var stopped = new EscortLeapfrogTracker();
+        stopped.Tick(fate, 77, Vector3.Zero, new Vector3(-10, 0, 0), now);
+        stopped.Tick(fate, 77, new Vector3(2, 0, 0), new Vector3(-10, 0, 0), now.AddSeconds(1));
+        Check(stopped.Tick(fate, 77, new Vector3(2, 0, 0), new Vector3(-10, 0, 0), now.AddSeconds(4)) == null &&
+              stopped.Heading == Vector2.Zero,
+            "escort tracker abandons prediction when anchor stops");
+
+        var jitter = new EscortLeapfrogTracker();
+        jitter.Tick(fate, 77, Vector3.Zero, new Vector3(-10, 0, 0), now);
+        for (var tick = 1; tick <= 120; tick++)
+        {
+            var jitterPosition = tick % 2 == 0 ? 0.08f : -0.08f;
+            jitter.Tick(fate, 77, new Vector3(jitterPosition, 0, 0), new Vector3(-10, 0, 0),
+                now.AddSeconds(tick / 60d));
+        }
+        Check(jitter.Destination == null &&
+              jitter.Heading == Vector2.Zero,
+            "small anchor jitter does not create a false escort heading");
     }
 
     static T Stub<T>(Func<MethodInfo, object?[]?, object?>? handler = null) where T : class
@@ -763,6 +892,15 @@ class Program
 
     static void TestNearestAetheryteReturnRoute()
     {
+        Check(IdleAetheryteReturnPolicy.ShouldYieldToEligibleFate(true, true, true),
+            "parked idle return yields control to a newly eligible FATE");
+        Check(IdleAetheryteReturnPolicy.ShouldYieldToEligibleFate(true, false, false),
+            "idle return yields to an eligible FATE before starting its teleport");
+        Check(!IdleAetheryteReturnPolicy.ShouldYieldToEligibleFate(true, true, false),
+            "idle return finishes a teleport that is still in progress");
+        Check(!IdleAetheryteReturnPolicy.ShouldYieldToEligibleFate(false, true, true),
+            "idle return stays parked while no eligible FATE exists");
+
         var now = DateTimeOffset.UtcNow;
         var target = new AetheryteSummary(77, 100, "Nearest Crystal", 0, new(100, 0, 100), "test", true, true, 3, 25, false);
         var zone = new ZoneInfo(100, "Test Zone", 0, true, true, target, [target], [target], true, false, default, now);

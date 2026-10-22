@@ -77,7 +77,7 @@ public sealed class IdleAetheryteReturnController
                 f.State is FateState.Preparing or FateState.Running)
             .ToArray();
         var eligible = fateSelector.SelectBest(fates) is not null;
-        if (eligible && !route.IsTeleportIssued)
+        if (IdleAetheryteReturnPolicy.ShouldYieldToEligibleFate(eligible, route.IsTeleportIssued, parked))
         {
             Reset();
             return false;

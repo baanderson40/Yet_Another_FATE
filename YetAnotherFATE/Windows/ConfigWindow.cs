@@ -58,9 +58,14 @@ public class ConfigWindow : Window, IDisposable
         this.combatPlugins = combatPlugins;
         this.zones = zones;
         this.autoRetainer = autoRetainer;
+        YafTheme.SetPreset(configuration.ThemePreset);
     }
 
     public void Dispose() { }
+
+    public override void PreDraw() => YafTheme.Push();
+
+    public override void PostDraw() => YafTheme.Pop();
 
     public override void Draw()
     {
@@ -298,6 +303,23 @@ public class ConfigWindow : Window, IDisposable
 
     private void DrawDisplaySection()
     {
+        ImGui.TextColored(YafTheme.Accent, "Appearance");
+        ImGui.SetNextItemWidth(ControlWidth + 70f);
+        if (ImGui.BeginCombo("Theme", YafTheme.CurrentPreset))
+        {
+            foreach (var preset in YafTheme.PresetNames)
+            {
+                if (ImGui.Selectable(preset, preset == YafTheme.CurrentPreset))
+                {
+                    configuration.ThemePreset = preset;
+                    YafTheme.SetPreset(preset);
+                    configuration.Save();
+                }
+            }
+            ImGui.EndCombo();
+        }
+        ImGui.TextWrapped("Choose a shared color palette for the Main, Settings, and Debug windows.");
+        ImGui.Separator();
         ImGui.TextUnformatted("FATE Display");
         var format = configuration.DisplayNameFormat ?? Configuration.DefaultDisplayNameFormat;
         ImGui.SetNextItemWidth(ControlWidth + 150f);

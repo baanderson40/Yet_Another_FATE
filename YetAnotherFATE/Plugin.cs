@@ -132,7 +132,7 @@ public sealed class Plugin : IDalamudPlugin
         services.AddSingleton<IChocoboController, ChocoboController>();
         services.AddSingleton<IAutoRetainerClient, AutoRetainerClient>();
         services.AddSingleton<ILifestreamCharacterClient, LifestreamCharacterClient>();
-        services.AddSingleton<TerritoryReturnRoute>();
+        services.AddTransient<TerritoryReturnRoute>();
         services.AddSingleton<AutoRetainerHandoffController>();
         services.AddSingleton<WahToolsFeeshStatusReader>();
         services.AddSingleton<YesAlreadyLease>();

@@ -50,13 +50,20 @@ public class MainWindow : Window, IDisposable
 
     public void Dispose() { }
 
+    public override void PreDraw() => YafTheme.Push();
+
+    public override void PostDraw() => YafTheme.Pop();
+
     private static string GetWindowTitle()
     {
         var devBuild = typeof(MainWindow).Assembly
             .GetCustomAttributes<AssemblyMetadataAttribute>()
             .FirstOrDefault(attribute => attribute.Key == "YetAnotherFATE.DevBuild")?.Value ?? "unknown";
-        return $"Yet Another FATE [DEV {devBuild}]##main";
+        return FormatWindowTitle(devBuild);
     }
+
+    internal static string FormatWindowTitle(string devBuild)
+        => $"Yet Another FATE [DEV {devBuild}]###YetAnotherFATE.Main";
 
     public override void Draw()
     {

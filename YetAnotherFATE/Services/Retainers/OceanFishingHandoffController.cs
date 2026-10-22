@@ -101,6 +101,8 @@ public sealed class OceanFishingHandoffController : IDisposable
                 AutoRetainerHandoffPhase.Resuming or
                 AutoRetainerHandoffPhase.ChainingAutoRetainer)
             {
+                if (restored.Phase == AutoRetainerHandoffPhase.ReturningOriginalTerritory)
+                    territoryReturnRoute.Reset();
                 Status = $"Recovered Ocean Fishing handoff at {restored.Phase}; continuing safe return";
             }
             else if (IsOceanTerritory(clientState.TerritoryType) &&
@@ -127,9 +129,7 @@ public sealed class OceanFishingHandoffController : IDisposable
                 restored.WindowConsumed = true;
                 configuration.LastHandledOceanFishingWindowUtc = restored.WindowStartUtc;
                 ReleaseYesAlreadyLease(restored);
-                SetPhase(restored, IsOriginalCharacter(restored)
-                    ? AutoRetainerHandoffPhase.ReturningOriginalTerritory
-                    : AutoRetainerHandoffPhase.ReturningOriginalCharacter);
+                BeginReturnToOrigin(restored);
                 Status = "Reload interrupted before a confirmed voyage; returning without stopping unowned Feesh work";
             }
         }
@@ -241,11 +241,7 @@ public sealed class OceanFishingHandoffController : IDisposable
             return false;
         }
         session.LastError = null;
-        session.Phase = playerState.ContentId == session.OriginalContentId
-            ? AutoRetainerHandoffPhase.ReturningOriginalTerritory
-            : AutoRetainerHandoffPhase.ReturningOriginalCharacter;
-        session.PhaseStartedAtUtc = DateTimeOffset.UtcNow;
-        configuration.Save();
+        BeginReturnToOrigin(session);
         Status = "Manual recovery confirmed; returning to farming character";
         return true;
     }
@@ -309,7 +305,7 @@ public sealed class OceanFishingHandoffController : IDisposable
         if (DateTime.UtcNow >= session.WindowStartUtc + OceanFishingSchedule.LaunchCutoffOffset)
         {
             configuration.LastHandledOceanFishingWindowUtc = session.WindowStartUtc;
-            SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalTerritory);
+            BeginReturnToOrigin(session);
             Status = "Ocean Fishing launch cutoff passed; skipping this window";
             return true;
         }
@@ -595,18 +591,14 @@ public sealed class OceanFishingHandoffController : IDisposable
             if (session.RetainerLegObserved || !autoRetainerHandoff.HasPendingManualPass)
             {
                 session.WindowConsumed = true;
-                SetPhase(session, IsOriginalCharacter(session)
-                    ? AutoRetainerHandoffPhase.ReturningOriginalTerritory
-                    : AutoRetainerHandoffPhase.ReturningOriginalCharacter);
+                BeginReturnToOrigin(session);
                 return true;
             }
             if (DateTimeOffset.UtcNow - session.PhaseStartedAtUtc >= TimeSpan.FromMinutes(5))
             {
                 autoRetainerHandoff.CancelPendingManualPass();
                 session.WindowConsumed = true;
-                SetPhase(session, IsOriginalCharacter(session)
-                    ? AutoRetainerHandoffPhase.ReturningOriginalTerritory
-                    : AutoRetainerHandoffPhase.ReturningOriginalCharacter);
+                BeginReturnToOrigin(session);
                 Status = "AutoRetainer safe-boundary wait timed out; returning to FATE farming";
                 return true;
             }
@@ -617,9 +609,7 @@ public sealed class OceanFishingHandoffController : IDisposable
         if (!configuration.AutoRetainerHandoffEnabled)
         {
             session.WindowConsumed = true;
-            SetPhase(session, IsOriginalCharacter(session)
-                ? AutoRetainerHandoffPhase.ReturningOriginalTerritory
-                : AutoRetainerHandoffPhase.ReturningOriginalCharacter);
+            BeginReturnToOrigin(session);
             return true;
         }
         if (DateTimeOffset.UtcNow - session.PhaseStartedAtUtc < TimeSpan.FromSeconds(5))
@@ -632,9 +622,7 @@ public sealed class OceanFishingHandoffController : IDisposable
             if (DateTimeOffset.UtcNow - session.PhaseStartedAtUtc >= TimeSpan.FromMinutes(1))
             {
                 session.WindowConsumed = true;
-                SetPhase(session, IsOriginalCharacter(session)
-                    ? AutoRetainerHandoffPhase.ReturningOriginalTerritory
-                    : AutoRetainerHandoffPhase.ReturningOriginalCharacter);
+                BeginReturnToOrigin(session);
                 Status = "AutoRetainer readiness unavailable for one minute; returning to FATE farming";
                 return true;
             }
@@ -644,9 +632,7 @@ public sealed class OceanFishingHandoffController : IDisposable
         if (!readiness.WorkReady)
         {
             session.WindowConsumed = true;
-            SetPhase(session, IsOriginalCharacter(session)
-                ? AutoRetainerHandoffPhase.ReturningOriginalTerritory
-                : AutoRetainerHandoffPhase.ReturningOriginalCharacter);
+            BeginReturnToOrigin(session);
             Status = "No AutoRetainer work ready; returning to FATE farming";
             return true;
         }
@@ -754,7 +740,7 @@ public sealed class OceanFishingHandoffController : IDisposable
     {
         if (IsOriginalCharacter(session) && IsPlayerSafe())
         {
-            SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalTerritory);
+            BeginReturnToOrigin(session);
             return true;
         }
         if (DateTimeOffset.UtcNow - session.PhaseStartedAtUtc > CharacterTimeout) { Fail(session, "Could not return to farming character"); return true; }
@@ -773,7 +759,7 @@ public sealed class OceanFishingHandoffController : IDisposable
     private bool TickWaitForOriginal(OceanFishingHandoffSession session)
     {
         if (DateTimeOffset.UtcNow - session.PhaseStartedAtUtc > CharacterTimeout) { Fail(session, "Farming character did not finish loading"); return true; }
-        if (IsOriginalCharacter(session) && IsPlayerSafe()) SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalTerritory);
+        if (IsOriginalCharacter(session) && IsPlayerSafe()) BeginReturnToOrigin(session);
         else Status = $"Waiting for {session.OriginalCharacterName}@{session.OriginalWorldName}";
         return true;
     }
@@ -784,7 +770,14 @@ public sealed class OceanFishingHandoffController : IDisposable
         var result = territoryReturnRoute.Tick(session.OriginalTerritoryId, session.OriginalPosition,
             clientState.TerritoryType, IsPlayerSafe(), DateTimeOffset.UtcNow);
         if (result == TerritoryReturnResult.Arrived) SetPhase(session, AutoRetainerHandoffPhase.Resuming);
-        else if (result == TerritoryReturnResult.Failed) Fail(session, territoryReturnRoute.Failure ?? "Could not return to farming territory");
+        else if (result == TerritoryReturnResult.Failed)
+        {
+            var reason = territoryReturnRoute.Failure ?? "Could not return to farming territory";
+            log.Warning("Ocean Fishing origin return failed. OriginalContentId={ContentId} CurrentTerritory={CurrentTerritory} DestinationTerritory={DestinationTerritory} PlayerSafe={PlayerSafe} ElapsedSeconds={ElapsedSeconds:0.0} Attempts={Attempts} Failure={Failure}",
+                session.OriginalContentId, clientState.TerritoryType, session.OriginalTerritoryId, IsPlayerSafe(),
+                territoryReturnRoute.Elapsed.TotalSeconds, territoryReturnRoute.Attempts, reason);
+            Fail(session, reason);
+        }
         else Status = $"Returning to farming territory {session.OriginalTerritoryId}";
         return true;
     }
@@ -870,6 +863,21 @@ public sealed class OceanFishingHandoffController : IDisposable
         session.Phase = phase;
         session.PhaseStartedAtUtc = DateTimeOffset.UtcNow;
         configuration.Save();
+    }
+
+    private void BeginReturnToOrigin(OceanFishingHandoffSession session)
+    {
+        if (IsOriginalCharacter(session))
+        {
+            territoryReturnRoute.Reset();
+            log.Information("Starting Ocean Fishing return to origin territory. ContentId={ContentId} CurrentTerritory={CurrentTerritory} DestinationTerritory={DestinationTerritory} PlayerSafe={PlayerSafe}; route state reset.",
+                session.OriginalContentId, clientState.TerritoryType, session.OriginalTerritoryId, IsPlayerSafe());
+            SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalTerritory);
+        }
+        else
+        {
+            SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalCharacter);
+        }
     }
 
     private void Fail(OceanFishingHandoffSession session, string reason)

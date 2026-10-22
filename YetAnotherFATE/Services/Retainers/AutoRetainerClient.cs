@@ -69,12 +69,15 @@ public sealed class AutoRetainerClient : IAutoRetainerClient
             var selectedRetainers = getEnabledRetainers.InvokeFunc() ?? new Dictionary<ulong, HashSet<string>>();
             var (advanceSeconds, waitForAll) = ReadRetainerConfiguration();
             var retainerReadyCount = 0;
-            var retainerCandidates = 0;
             long? closestRetainerSeconds = null;
             var deployableReady = false;
 
             foreach (var contentId in registered)
             {
+                var character = getOfflineCharacterData.InvokeFunc(contentId);
+                if (character is null)
+                    continue;
+
                 if (mode is AutoRetainerMode.Retainers or AutoRetainerMode.Everything)
                 {
                     var remaining = getClosestRetainer.InvokeFunc(contentId);
@@ -82,18 +85,25 @@ public sealed class AutoRetainerClient : IAutoRetainerClient
                     {
                         if (closestRetainerSeconds is null || seconds < closestRetainerSeconds)
                             closestRetainerSeconds = seconds;
-                        var allRemaining = ReadRetainerRemaining(contentId, selectedRetainers, seconds);
-                        retainerCandidates++;
-                        if (IsRetainerReady(allRemaining, seconds, waitForAll, advanceSeconds))
-                            retainerReadyCount++;
                     }
+
+                    var selected = selectedRetainers.TryGetValue(contentId, out var enabledRetainers)
+                        ? enabledRetainers
+                        : new HashSet<string>();
+                    var allRemaining = ReadRetainerRemaining(character, selected, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+                    var characterEnabled = ReadMember(character.GetType(), character, "Enabled", false);
+                    var closest = remaining is { } closestSeconds ? closestSeconds : (long?)null;
+                    if (AutoRetainerReadinessPolicy.IsRetainerReady(
+                            characterEnabled, allRemaining.Count > 0, allRemaining, closest, waitForAll, advanceSeconds))
+                        retainerReadyCount++;
                 }
 
                 if (mode is AutoRetainerMode.Submersibles or AutoRetainerMode.Everything)
-                    deployableReady |= areVesselsReady.InvokeFunc(contentId) == true;
+                    deployableReady |= ReadMember(character.GetType(), character, "WorkshopEnabled", false) &&
+                                       areVesselsReady.InvokeFunc(contentId) == true;
             }
 
-            var retainerReady = retainerCandidates > 0 && retainerReadyCount > 0;
+            var retainerReady = retainerReadyCount > 0;
             var workReady = mode switch
             {
                 AutoRetainerMode.Retainers => retainerReady,
@@ -205,49 +215,50 @@ public sealed class AutoRetainerClient : IAutoRetainerClient
         }
     }
 
-    private IReadOnlyList<long> ReadRetainerRemaining(
-        ulong contentId,
-        IReadOnlyDictionary<ulong, HashSet<string>> selectedRetainers,
-        long closestSeconds)
+    private static IReadOnlyList<long> ReadRetainerRemaining(object character, IReadOnlySet<string> selectedRetainers, long nowUnixSeconds)
     {
-        if (!selectedRetainers.TryGetValue(contentId, out var selected) || selected.Count == 0)
-            return [closestSeconds];
+        if (selectedRetainers.Count == 0)
+            return Array.Empty<long>();
 
-        var character = getOfflineCharacterData.InvokeFunc(contentId);
-        var dataType = character.GetType();
-        var retainerData = dataType.GetField("RetainerData", BindingFlags.Public | BindingFlags.Instance)?.GetValue(character) as System.Collections.IEnumerable;
+        var retainerData = ReadObjectMember(character, "RetainerData") as System.Collections.IEnumerable;
         if (retainerData is null)
-            return [closestSeconds];
+            return Array.Empty<long>();
 
         var remaining = new List<long>();
         foreach (var retainer in retainerData)
         {
             if (retainer is null)
                 continue;
-            var type = retainer.GetType();
-            var name = type.GetField("Name", BindingFlags.Public | BindingFlags.Instance)?.GetValue(retainer) as string;
-            var hasVenture = type.GetField("HasVenture", BindingFlags.Public | BindingFlags.Instance)?.GetValue(retainer) as bool?;
-            var ventureEndsAt = type.GetField("VentureEndsAt", BindingFlags.Public | BindingFlags.Instance)?.GetValue(retainer);
-            if (name is null || !selected.Contains(name) || hasVenture != true || ventureEndsAt is null)
+            var name = ReadObjectMember(retainer, "Name")?.ToString();
+            var hasVenture = ReadMember(retainer.GetType(), retainer, "HasVenture", false);
+            var ventureEndsAt = ReadMember(retainer.GetType(), retainer, "VentureEndsAt", 0L);
+            if (string.IsNullOrWhiteSpace(name) || !selectedRetainers.Contains(name) || !hasVenture || ventureEndsAt <= 0)
                 continue;
-            remaining.Add(Convert.ToInt64(ventureEndsAt, CultureInfo.InvariantCulture) - DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            remaining.Add(ventureEndsAt - nowUnixSeconds);
         }
 
-        return remaining.Count == 0 ? [closestSeconds] : remaining;
+        return remaining;
     }
 
-    private static bool IsRetainerReady(IReadOnlyList<long> remaining, long closestSeconds, bool waitForAll, long advanceSeconds)
+    private static object? ReadObjectMember(object? value, string name)
     {
-        if (closestSeconds > advanceSeconds)
-            return false;
-        return !waitForAll || remaining.All(seconds => seconds <= advanceSeconds);
+        if (value is JObject json && json.TryGetValue(name, StringComparison.OrdinalIgnoreCase, out var token))
+            return token is JValue jValue ? jValue.Value : token;
+
+        if (value is JToken jsonToken && jsonToken.Type == JTokenType.Object &&
+            jsonToken[name] is { } child)
+            return child is JValue childValue ? childValue.Value : child;
+
+        if (value is null)
+            return null;
+        var type = value.GetType();
+        return type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance)?.GetValue(value) ??
+               type.GetField(name, BindingFlags.Public | BindingFlags.Instance)?.GetValue(value);
     }
 
     private static T ReadMember<T>(Type type, object value, string name, T fallback)
     {
-        var property = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
-        var field = type.GetField(name, BindingFlags.Public | BindingFlags.Instance);
-        var raw = property?.GetValue(value) ?? field?.GetValue(value);
+        var raw = ReadObjectMember(value, name);
         if (raw is null)
             return fallback;
         try

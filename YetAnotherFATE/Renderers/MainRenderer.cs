@@ -11,6 +11,7 @@ using YetAnotherFATE.Data.Fates;
 using YetAnotherFATE.Data.Travel;
 using YetAnotherFATE.Services.Fates;
 using YetAnotherFATE.Services.Travel;
+using YetAnotherFATE.Windows;
 
 namespace YetAnotherFATE.Renderers;
 
@@ -105,14 +106,14 @@ public sealed class MainRenderer
                 ImGui.TableNextRow();
                 if (selectedId.HasValue && selectedId.Value == fate.FateId)
                 {
-                    ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg1, ImGui.ColorConvertFloat4ToU32(new Vector4(0.2f, 0.35f, 0.15f, 0.45f)));
+                    ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg1, ImGui.ColorConvertFloat4ToU32(YafTheme.Selected));
                 }
 
                 ImGui.TableSetColumnIndex(0);
                 if (fate.HasBonus)
                 {
                     using (ImRaii.PushFont(Dalamud.Interface.UiBuilder.IconFont))
-                        ImGui.TextColored(new Vector4(1f, 0.8f, 0.2f, 1f), Dalamud.Interface.FontAwesomeIcon.Star.ToIconString());
+                        ImGui.TextColored(YafTheme.Accent, Dalamud.Interface.FontAwesomeIcon.Star.ToIconString());
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Bonus FATE");
                     ImGui.SameLine();
                 }
@@ -184,9 +185,10 @@ public sealed class MainRenderer
                 ImGui.Text(candidate.Score?.FinalScore.ToString("F1") ?? "-");
 
                 ImGui.TableSetColumnIndex(6);
-                ImGui.TextWrapped(candidate.Eligible
+                var eligibility = candidate.Eligible
                     ? followUpTracker.IsPreferred(fate) ? "Eligible follow-up" : "Eligible"
-                    : candidate.ExclusionReason ?? "Excluded");
+                    : candidate.ExclusionReason ?? "Excluded";
+                ImGui.TextColored(YafTheme.ForStatus(candidate.Eligible ? "Eligible" : "Blocked"), eligibility);
 
                 ImGui.TableSetColumnIndex(7);
                 DrawProgress(fate.Progress);

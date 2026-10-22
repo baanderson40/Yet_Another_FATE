@@ -282,16 +282,19 @@ public sealed class TravelController : ITravelController, IDisposable
                 return;
             }
 
-            UpdatePhaseInternal(job.JobId, TravelPhase.Mounting, "Ensuring mount");
-            var travelDistance = await RunForJobOnFrameworkThreadAsync(job.JobId, () => GetTravelDistance(job.Selection), token).ConfigureAwait(false);
-            if (travelDistance <= ShortCorrectionDistance)
+            if (job.Kind != TravelRequestKind.EscortPositioning)
             {
-                log.Debug("TravelController: short correction ({Distance:F1}y); skipping mount", travelDistance);
-            }
-            else if (!await EnsureMountedAsync(job.JobId, token).ConfigureAwait(false))
-            {
-                FailJob(job.JobId, "Failed to mount after retries");
-                return;
+                UpdatePhaseInternal(job.JobId, TravelPhase.Mounting, "Ensuring mount");
+                var travelDistance = await RunForJobOnFrameworkThreadAsync(job.JobId, () => GetTravelDistance(job.Selection), token).ConfigureAwait(false);
+                if (travelDistance <= ShortCorrectionDistance)
+                {
+                    log.Debug("TravelController: short correction ({Distance:F1}y); skipping mount", travelDistance);
+                }
+                else if (!await EnsureMountedAsync(job.JobId, token).ConfigureAwait(false))
+                {
+                    FailJob(job.JobId, "Failed to mount after retries");
+                    return;
+                }
             }
 
             if (!await WaitForWorldReadyAsync(token).ConfigureAwait(false))
@@ -304,7 +307,8 @@ public sealed class TravelController : ITravelController, IDisposable
 
             token.ThrowIfCancellationRequested();
 
-            await PrepareObstacleMapAsync(job, token).ConfigureAwait(false);
+            if (job.Kind != TravelRequestKind.EscortPositioning)
+                await PrepareObstacleMapAsync(job, token).ConfigureAwait(false);
 
             if (!await WaitForCombatClearAsync(token).ConfigureAwait(false))
             {
@@ -402,7 +406,8 @@ public sealed class TravelController : ITravelController, IDisposable
     private async Task<bool> TryReachDestinationAsync(TravelJob job, CancellationToken token)
     {
         var strictDestination = job.ArrivalRadius < DefaultArrivalRadius;
-        var fly = await RunForJobOnFrameworkThreadAsync(job.JobId, CanFlyForMovement, token).ConfigureAwait(false);
+        var fly = job.Kind != TravelRequestKind.EscortPositioning &&
+                  await RunForJobOnFrameworkThreadAsync(job.JobId, CanFlyForMovement, token).ConfigureAwait(false);
         var useFlightApproach = ShouldUseFlightApproach(strictDestination, fly);
         var destinations = useFlightApproach
             ? await ResolveFateLandingDestinationsAsync(job, token).ConfigureAwait(false)
@@ -975,6 +980,7 @@ public sealed class TravelController : ITravelController, IDisposable
     private static int GetPriority(TravelRequestKind kind) => kind switch
     {
         TravelRequestKind.DebugForceRun => 10,
+        TravelRequestKind.EscortPositioning => -10,
         _ => 0,
     };
 

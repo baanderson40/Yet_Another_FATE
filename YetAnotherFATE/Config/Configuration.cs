@@ -21,6 +21,7 @@ public class Configuration : IPluginConfiguration
     public const string DefaultDisplayNameFormat = "[{Level}] {Name}";
     public static readonly Vector4 DefaultBarColour = new(0.404f, 0.259f, 0.541f, 1f);
     public string DisplayNameFormat { get; set; } = DefaultDisplayNameFormat;
+    public string ThemePreset { get; set; } = "Fiery Ocean";
     public Vector4 BarColour { get; set; } = DefaultBarColour;
     public List<uint> FateBlacklist { get; set; } = new();
     public List<FateRule> BlacklistedFateRules { get; set; } = new();
@@ -124,6 +125,12 @@ public class Configuration : IPluginConfiguration
         if (Version < 5)
         {
             Version = 5;
+            Save();
+        }
+        if (Version < 6)
+        {
+            ThemePreset = string.IsNullOrWhiteSpace(ThemePreset) ? "Fiery Ocean" : ThemePreset;
+            Version = 6;
             Save();
         }
     }

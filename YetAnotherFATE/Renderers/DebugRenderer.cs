@@ -14,6 +14,7 @@ using YetAnotherFATE.Services.Fates;
 using YetAnotherFATE.Services.Combat;
 using YetAnotherFATE.Services.Movement;
 using YetAnotherFATE.Services.Travel;
+using YetAnotherFATE.Windows;
 
 namespace YetAnotherFATE.Renderers;
 
@@ -124,8 +125,10 @@ public sealed class DebugRenderer
         }
         ImGui.Separator();
         ImGui.Text($"Territory: {clientState.TerritoryType} | Player loaded: {playerState.IsLoaded}");
-        ImGui.Text($"Automator: {automatorChain.State} ({automatorChain.StateReason ?? "no reason"})");
-        ImGui.Text($"Travel: {automatorChain.TravelPhase} ({automatorChain.TravelPhaseDetail ?? "n/a"})");
+        ImGui.TextColored(YafTheme.ForStatus(automatorChain.State.ToString()),
+            $"Automator: {automatorChain.State} ({automatorChain.StateReason ?? "no reason"})");
+        ImGui.TextColored(YafTheme.ForStatus(automatorChain.TravelPhase.ToString()),
+            $"Travel: {automatorChain.TravelPhase} ({automatorChain.TravelPhaseDetail ?? "n/a"})");
         ImGui.Text($"Teleport: {teleportExecutor.State} | Navmesh: {navmeshClient.IsAvailable} ({navmeshClient.Status})");
         ImGui.Text($"Activation: {fateActivationService.Status}");
         ImGui.TextWrapped($"Zone rotation: {automatorChain.ZoneRotationStatus}");
@@ -142,7 +145,7 @@ public sealed class DebugRenderer
             ImGui.Text($"Remaining: {remaining}");
         }
         if (rewardTracker.PendingStop)
-            ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "Stop pending: waiting until safe");
+            ImGui.TextColored(YafTheme.Amber, "Stop pending: waiting until safe");
 
         if (configuration.AutoRetainerHandoffEnabled || automatorChain.AutoRetainerHandoffPhase != AutoRetainerHandoffPhase.Idle)
         {
@@ -196,7 +199,10 @@ public sealed class DebugRenderer
             }
 
             ImGui.Text($"Territory {candidate.Fate.TerritoryId} | Level {candidate.Fate.Level} | Distance {candidate.Fate.DistanceFromPlayer:F1}y | Time {candidate.Fate.TimeRemaining:mm\\:ss}");
-            ImGui.Text($"State: {candidate.Fate.State} | Eligibility: {(candidate.Eligible ? "Eligible" : candidate.ExclusionReason ?? "Excluded")}");
+            ImGui.Text($"State: {candidate.Fate.State} | Eligibility:");
+            ImGui.SameLine();
+            var eligibility = candidate.Eligible ? "Eligible" : candidate.ExclusionReason ?? "Excluded";
+            ImGui.TextColored(YafTheme.ForStatus(candidate.Eligible ? "Eligible" : "Blocked"), eligibility);
             ImGui.Text($"Progress: {candidate.Fate.Progress}% | Hand-ins: {candidate.Fate.HandInCount} | Bonus: {candidate.Fate.HasBonus} | Max level: {candidate.Fate.MaxLevel}");
             ImGui.Text($"Motivation NPC: {FormatObjectId(candidate.Fate.MotivationNpc)} | Objective NPC: {FormatObjectId(candidate.Fate.ObjectiveNpc)}");
             ImGui.Text($"Rule: {candidate.Fate.FateRule} ({candidate.Fate.Rule}) | Chain: {candidate.Fate.FateChain} | Fate rule extension: {candidate.Fate.FateRuleEx} | Event item: {candidate.Fate.EventItem}");
@@ -255,7 +261,8 @@ public sealed class DebugRenderer
             ImGui.TableSetColumnIndex(0);
             ImGui.TextUnformatted(status.DisplayName);
             ImGui.TableSetColumnIndex(1);
-            ImGui.TextUnformatted(GetPluginStateLabel(status));
+            var stateLabel = GetPluginStateLabel(status);
+            ImGui.TextColored(YafTheme.ForStatus(stateLabel), stateLabel);
             ImGui.TableSetColumnIndex(2);
             ImGui.TextUnformatted(status.Version ?? "n/a");
             ImGui.TableSetColumnIndex(3);
@@ -284,7 +291,9 @@ public sealed class DebugRenderer
         ImGui.Separator();
         ImGui.TextUnformatted("Teleport analysis");
         var recommendation = analysis.Recommendation;
-        ImGui.Text($"Decision: {(recommendation.ShouldTeleport ? "TELEPORT" : "RUN")} ({recommendation.Reason})");
+        var decision = recommendation.ShouldTeleport ? "TELEPORT" : "RUN";
+        ImGui.TextColored(recommendation.ShouldTeleport ? YafTheme.Accent : YafTheme.Muted,
+            $"Decision: {decision} ({recommendation.Reason})");
         ImGui.Text($"Selected: {recommendation.AetheryteName ?? "none"} (ID {recommendation.AetheryteId?.ToString() ?? "n/a"}, sub-index {recommendation.SubIndex})");
         ImGui.Text($"Run: {recommendation.EstimatedRunDistance:F1}y / {recommendation.RunTimeSeconds:F1}s | Teleport route: {recommendation.EstimatedTeleportDistance:F1}y / {recommendation.TeleportTimeSeconds:F1}s");
         ImGui.Text($"Speed {analysis.RunSpeed:F1}y/s | Penalty {analysis.TeleportPenalty:F1}s | Buffer {analysis.PostTeleportBuffer:F1}y | Advantage {analysis.Advantage:F1}s / threshold {analysis.AdvantageThreshold:F1}s");

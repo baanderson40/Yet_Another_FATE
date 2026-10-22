@@ -25,6 +25,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
     private readonly TerritoryReturnRoute territoryReturnRoute;
     private readonly NearestAetheryteReturnRoute safeLocationRoute;
     private DateTimeOffset nextReadinessScan = DateTimeOffset.MinValue;
+    private DateTimeOffset automaticHandoffCooldownUntil = DateTimeOffset.MinValue;
     private DateTimeOffset nextReturnAttempt = DateTimeOffset.MinValue;
     private bool manualPassRequested;
     private bool manualPassSuppressResume;
@@ -168,6 +169,13 @@ public sealed class AutoRetainerHandoffController : IDisposable
 
         if (!manualPassRequested && !configuration.AutoRetainerHandoffEnabled)
             return false;
+
+        if (!manualPassRequested &&
+            !AutoRetainerReadinessPolicy.CanStartAutomaticPass(DateTimeOffset.UtcNow, automaticHandoffCooldownUntil))
+        {
+            Status = "AutoRetainer retry cooldown";
+            return false;
+        }
 
         ScanReadinessIfDue();
         if (!manualPassRequested && !lastReadiness.WorkReady)
@@ -466,7 +474,10 @@ public sealed class AutoRetainerHandoffController : IDisposable
         var shouldResume = session.WasAutomatorEnabled && configuration.AutomatorEnabled;
         configuration.AutoRetainerHandoff = null;
         configuration.Save();
-        nextReadinessScan = DateTimeOffset.UtcNow.AddSeconds(Math.Clamp(configuration.AutoRetainerRetryCooldownSeconds, 30, 1800));
+        var now = DateTimeOffset.UtcNow;
+        automaticHandoffCooldownUntil = now.AddSeconds(Math.Clamp(configuration.AutoRetainerRetryCooldownSeconds, 30, 1800));
+        nextReadinessScan = automaticHandoffCooldownUntil;
+        lastReadiness = default;
         if (shouldResume)
             chain.ResumeAfterAutoRetainerHandoff();
         else
@@ -533,6 +544,7 @@ public sealed class AutoRetainerHandoffController : IDisposable
         };
         configuration.AutoRetainerHandoff = session;
         configuration.Save();
+        lastReadiness = default;
         chain.PrepareForExternalHandoff("AutoRetainer handoff starting");
         safeLocationRoute.Reset();
         manualPassRequested = false;
@@ -572,7 +584,9 @@ public sealed class AutoRetainerHandoffController : IDisposable
         session.PhaseStartedAtUtc = DateTimeOffset.UtcNow;
         session.LastError = reason;
         configuration.Save();
-        nextReadinessScan = DateTimeOffset.UtcNow.AddSeconds(Math.Clamp(configuration.AutoRetainerRetryCooldownSeconds, 30, 1800));
+        automaticHandoffCooldownUntil = DateTimeOffset.UtcNow.AddSeconds(Math.Clamp(configuration.AutoRetainerRetryCooldownSeconds, 30, 1800));
+        nextReadinessScan = automaticHandoffCooldownUntil;
+        lastReadiness = default;
         log.Warning("AutoRetainer handoff failed: {Reason}", reason);
         Status = reason;
     }

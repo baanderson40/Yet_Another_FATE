@@ -16,6 +16,8 @@ public sealed class TerritoryReturnRoute(IZoneService zones, ITeleportExecutor t
     private int attempts;
 
     public string? Failure { get; private set; }
+    public int Attempts => attempts;
+    public TimeSpan Elapsed => startedAt is { } started ? DateTimeOffset.UtcNow - started : TimeSpan.Zero;
 
     public void Reset()
     {
@@ -74,7 +76,7 @@ public sealed class TerritoryReturnRoute(IZoneService zones, ITeleportExecutor t
             return Fail("No unlocked aetheryte in origin territory; manual recovery required");
 
         var target = candidates[0];
-        var recommendation = new TeleportRecommendation(true, target.AetheryteId, "Return to AutoRetainer origin territory",
+        var recommendation = new TeleportRecommendation(true, target.AetheryteId, "Return to farming origin territory",
             0, 0, 0, 0, 0, target.GilCost, target.IsFavourite, target.Name, target.SubIndex);
         var result = teleports.RequestTeleport(recommendation);
         nextAttempt = now.AddSeconds(1);
