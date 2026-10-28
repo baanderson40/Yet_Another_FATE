@@ -161,7 +161,7 @@ public sealed class MainCommandDelegate : IMainCommandDelegate
                 return;
             }
             rewardTracker.Stop();
-            chatGui.Print("YAFate: stopped");
+            chatGui.Print("YAFate: stop requested; canceling owned work and releasing blockers");
             return;
         }
 

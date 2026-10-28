@@ -94,6 +94,8 @@ class Program
         var log = DispatchProxy.Create<IPluginLog, Noop>();
         var lifecycle = DispatchProxy.Create<IAddonLifecycle, Noop>();
         using var rewards = new FateRewardTracker(lifecycle, config, log);
+        var manualStopEvents = 0;
+        rewards.ManualStopRequested += () => manualStopEvents++;
         var args = (AddonArgs)RuntimeHelpers.GetUninitializedObject(typeof(AddonArgs));
         void Reward() => typeof(FateRewardTracker).GetMethod("OnReward", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(rewards, [AddonEvent.PostSetup, args]);
         void Close() => typeof(FateRewardTracker).GetMethod("OnRewardFinalized", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(rewards, [AddonEvent.PreFinalize, args]);
@@ -103,10 +105,12 @@ class Program
         rewards.Start(3); Check(rewards.CompletedCount == 1 && rewards.Remaining == 2, "active run target preserves reward baseline");
         Close(); Reward(); Check(rewards.CompletedCount == 2, "reused addon address counts after finalize");
         rewards.Start(2); Check(rewards.PendingStop, "lowered target stops when already reached");
-        rewards.CompleteSafeStop(); Check(!config.AutomatorEnabled && rewards.RunUntil == null, "safe stop ends session");
+        rewards.CompleteSafeStop(); Check(!config.AutomatorEnabled && rewards.RunUntil == null && manualStopEvents == 0,
+            "safe stop ends session without becoming an immediate manual cancellation");
         Close(); rewards.Start(1); Check(rewards.CompletedCount == 0, "new session resets count");
         Reward(); Check(rewards.PendingStop, "new reward hits target");
         rewards.Stop();
+        Check(manualStopEvents == 1, "ordinary Stop raises explicit manual cancellation request");
         rewards.Start();
         Check(config.AutomatorEnabled && rewards.RunUntil == null && !rewards.PendingStop, "unlimited UI start resets run target");
 
@@ -260,8 +264,14 @@ class Program
         var probe = new ProbeHandler();
         config.AutomatorEnabled = true;
         var automaticTravel = new AutomaticTravelPolicy(config, client, objects, Stub<IFateTable>(), conditions);
-        using var chain = new AutomatorChain(Stub<ITravelController>(), log, conditions, client, objects, follow, completion, map,
-            text, Stub<IFateRewardTracker>(), config, [probe], new BossModPresetManager(pi, Stub<ICombatPluginRegistry>(), config, log, Stub<IPlayerState>()),
+        var allTravelCancels = 0;
+        var chainTravel = Stub<ITravelController>((m, a) =>
+        {
+            if (m.Name == "Cancel" && a?[1] == null) allTravelCancels++;
+            return Noop.Default(m);
+        });
+        using var chain = new AutomatorChain(chainTravel, log, conditions, client, objects, follow, completion, map,
+            text, rewards, config, [probe], new BossModPresetManager(pi, Stub<ICombatPluginRegistry>(), config, log, Stub<IPlayerState>()),
             Stub<IRotationSolverBridge>(), Stub<IWrathComboBridge>(), combat,
             new FateObstacleMapAssurance(map, Stub<YetAnotherFATE.Services.Movement.INavmeshClient>()), automaticTravel);
         chain.Tick(); Check(chain.State == AutomatorState.SelectingFate, "chain enables");
@@ -270,8 +280,13 @@ class Program
         hp = 100; territory = 101; chain.Tick();
         Check(chain.State != AutomatorState.Recovering && chain.CurrentSelection == null && probe.Resets > 0, "manual territory takeover exits recovery without reissuing return");
         unconscious = true; chain.Tick(); Check(chain.State == AutomatorState.Recovering, "unconscious flag triggers global recovery");
-        config.AutomatorEnabled = false; follow.Begin(fate); chain.Tick();
-        Check(chain.State == AutomatorState.Disabled && !follow.IsWatching, "disable clears followup and state");
+        follow.Begin(fate);
+        var probeTicksBeforeStop = probe.Ticks;
+        rewards.Stop();
+        chain.Tick();
+        Check(chain.State == AutomatorState.Disabled && !follow.IsWatching && allTravelCancels > 0 &&
+              probe.Ticks == probeTicksBeforeStop,
+            "manual Stop cancels all travel and does not advance automator handlers");
         unconscious = false;
         int rewardCount = 0;
         var collect = eligible with { Rule = (byte)FateRule.Collect, Progress = 100 };
@@ -1055,8 +1070,13 @@ public class Noop : DispatchProxy
 class ProbeHandler : IAutomatorStateHandler
 {
     public int Resets;
+    public int Ticks;
     public bool CanHandle(AutomatorState state) => true;
-    public AutomatorStateHandlerResult Tick(AutomatorContext context) => AutomatorStateHandlerResult.Wait("test probe");
+    public AutomatorStateHandlerResult Tick(AutomatorContext context)
+    {
+        Ticks++;
+        return AutomatorStateHandlerResult.Wait("test probe");
+    }
     public void Reset() => Resets++;
 }
 

@@ -155,12 +155,15 @@ public sealed class DebugRenderer
                 ImGui.TextDisabled($"Ready characters: {readiness.ReadyCharacterCount}/{readiness.RegisteredCharacterCount} | Mode: {configuration.AutoRetainerMode}");
             if (automatorChain.AutoRetainerHandoffPhase == AutoRetainerHandoffPhase.Failed)
             {
-                if (ImGui.SmallButton("Retry##debug-retainer"))
-                    automatorChain.RetryAutoRetainerHandoff();
-                ImGui.SameLine();
-                if (ImGui.SmallButton("Resume##debug-retainer"))
-                    automatorChain.ResumeAutoRetainerHandoff();
-                ImGui.SameLine();
+                if (configuration.AutoRetainerHandoff?.ManualStopRequested != true)
+                {
+                    if (ImGui.SmallButton("Retry##debug-retainer"))
+                        automatorChain.RetryAutoRetainerHandoff();
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton("Resume##debug-retainer"))
+                        automatorChain.ResumeAutoRetainerHandoff();
+                    ImGui.SameLine();
+                }
                 if (ImGui.SmallButton("Abandon##debug-retainer"))
                     automatorChain.AbandonAutoRetainerHandoff();
             }

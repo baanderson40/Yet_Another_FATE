@@ -2,6 +2,8 @@ namespace YetAnotherFATE.Services.Fates;
 
 public interface IFateRewardTracker
 {
+    event System.Action? ManualStopRequested;
+
     int CompletedCount { get; }
     int? RunUntil { get; }
     int? Remaining { get; }

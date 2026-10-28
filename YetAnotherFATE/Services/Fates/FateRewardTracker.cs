@@ -22,6 +22,7 @@ public sealed class FateRewardTracker : IFateRewardTracker, IDisposable
     public int? RunUntil { get; private set; }
     public int? Remaining => RunUntil is { } target ? Math.Max(0, target - CompletedCount) : null;
     public bool PendingStop { get; private set; }
+    public event Action? ManualStopRequested;
 
     public FateRewardTracker(IAddonLifecycle addonLifecycle, Configuration configuration, IPluginLog log)
     {
@@ -69,6 +70,12 @@ public sealed class FateRewardTracker : IFateRewardTracker, IDisposable
 
     public void Stop()
     {
+        StopSession();
+        ManualStopRequested?.Invoke();
+    }
+
+    private void StopSession()
+    {
         configuration.AutomatorEnabled = false;
         SynchronizeSession();
         configuration.Save();
@@ -84,7 +91,7 @@ public sealed class FateRewardTracker : IFateRewardTracker, IDisposable
     {
         if (PendingStop)
         {
-            Stop();
+            StopSession();
         }
     }
 

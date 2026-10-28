@@ -255,12 +255,101 @@ public sealed class OceanFishingHandoffController : IDisposable
         return true;
     }
 
+    public void CancelForManualStop()
+    {
+        safeLocationRoute.Reset();
+        territoryReturnRoute.Reset();
+
+        var session = configuration.OceanFishingHandoff;
+        if (session is null)
+        {
+            ReleaseYesAlreadyLease();
+            Status = "Ocean Fishing handoff canceled by manual Stop";
+            return;
+        }
+
+        ReleaseYesAlreadyLease(session);
+        if (session.ManualStopRequested)
+            return;
+
+        session.ManualStopRequested = true;
+        session.Phase = AutoRetainerHandoffPhase.Failed;
+        session.PhaseStartedAtUtc = DateTimeOffset.UtcNow;
+        session.LastError = "Canceled by manual Stop; YAF will not return characters or resume farming automatically.";
+        configuration.Save();
+
+        if (!session.LaunchAccepted && !session.LaunchAmbiguous && !session.OceanTerritoryEntered && IsOriginalCharacter(session))
+        {
+            configuration.OceanFishingHandoff = null;
+            configuration.Save();
+            Status = "Pending Ocean Fishing handoff canceled; no voyage is owned";
+            log.Information("Manual Stop canceled Ocean Fishing handoff before a confirmed voyage.");
+            return;
+        }
+
+        if (session.LaunchAccepted && !session.LaunchAmbiguous && !session.StopAccepted)
+        {
+            if (!feesh.IsAvailable)
+            {
+                session.LastError = "Canceled by manual Stop; Feesh unavailable, so the YAF-started voyage may still be active. Confirm Feesh stopped before recovery.";
+            }
+            else
+            {
+                session.StopRequested = true;
+                session.StopRequestedAtUtc = DateTime.UtcNow;
+                session.StopStatusGeneration = feeshStatus?.Generation;
+                configuration.Save();
+                try
+                {
+                    var result = feesh.Stop(out var error);
+                    session.StopAccepted = result == FeeshRequestResult.Accepted;
+                    if (session.StopAccepted)
+                    {
+                        session.StopAcceptedAtUtc = DateTime.UtcNow;
+                        session.LastError = "Manual Stop canceled automation; Feesh accepted Stop. Confirm it is idle before manual recovery.";
+                    }
+                    else
+                    {
+                        session.LastError = $"Canceled by manual Stop; Feesh Stop was not accepted ({result}: {error}). Confirm provider state before recovery.";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    session.LastError = $"Canceled by manual Stop; Feesh Stop outcome is unknown ({ex.Message}). Confirm provider state before recovery.";
+                    log.Error(ex, "Feesh Stop threw during manual cancellation");
+                }
+            }
+        }
+        else if (session.LaunchAmbiguous)
+        {
+            session.LastError = "Canceled by manual Stop; Feesh launch outcome is ambiguous. Confirm Feesh stopped before recovery.";
+        }
+        else if (session.LaunchAccepted && session.StopAccepted)
+        {
+            session.LastError = "Manual Stop canceled return/resume work; previously accepted Feesh Stop still requires idle confirmation.";
+        }
+        else if (!session.LaunchAccepted && !session.LaunchAmbiguous)
+        {
+            session.LastError = "Canceled by manual Stop while away from the original character; return manually, then abandon or resolve recovery.";
+        }
+
+        configuration.Save();
+        Status = session.LastError;
+        log.Warning("Manual Stop canceled Ocean Fishing automation. LaunchAccepted={LaunchAccepted} LaunchAmbiguous={LaunchAmbiguous} FeeshStopAccepted={StopAccepted}; no return or farming resume will be issued.",
+            session.LaunchAccepted, session.LaunchAmbiguous, session.StopAccepted);
+    }
+
     public void Dispose()
     {
         if (disposed) return;
         disposed = true;
         dutyState.DutyStarted -= OnDutyStarted;
         dutyState.DutyCompleted -= OnDutyCompleted;
+        yesAlreadyLease.Release();
+    }
+
+    private void ReleaseYesAlreadyLease()
+    {
         yesAlreadyLease.Release();
     }
 

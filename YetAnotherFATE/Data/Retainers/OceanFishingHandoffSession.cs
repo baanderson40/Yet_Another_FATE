@@ -20,6 +20,7 @@ public sealed class OceanFishingHandoffSession
     public bool LaunchRequested { get; set; }
     public bool LaunchAccepted { get; set; }
     public bool LaunchAmbiguous { get; set; }
+    public bool ManualStopRequested { get; set; }
     public bool DutyStarted { get; set; }
     public bool DutyCompleted { get; set; }
     public bool OceanFishingLegSkipped { get; set; }

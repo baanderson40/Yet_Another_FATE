@@ -100,6 +100,11 @@ public sealed class AutoRetainerHandoffController : IDisposable
         var session = configuration.AutoRetainerHandoff;
         if (session?.Phase != AutoRetainerHandoffPhase.Failed)
             return false;
+        if (session.ManualStopRequested)
+        {
+            Status = "Canceled by manual Stop; abandon or resolve the provider operation before restarting";
+            return false;
+        }
         if (session.OriginalTerritoryId == 0)
         {
             Status = session.LastError ?? "AutoRetainer origin territory unavailable; manual recovery required";
@@ -139,6 +144,11 @@ public sealed class AutoRetainerHandoffController : IDisposable
         var session = configuration.AutoRetainerHandoff;
         if (session?.Phase != AutoRetainerHandoffPhase.Failed)
             return false;
+        if (session.ManualStopRequested)
+        {
+            Status = "Canceled by manual Stop; automatic resume is blocked";
+            return false;
+        }
         session.LastError = null;
         territoryReturnRoute.Reset();
         if (!session.RequestIssued)
@@ -154,6 +164,37 @@ public sealed class AutoRetainerHandoffController : IDisposable
         else
             SetPhase(session, AutoRetainerHandoffPhase.ReturningOriginalCharacter);
         return true;
+    }
+
+    public void CancelForManualStop()
+    {
+        manualPassRequested = false;
+        manualPassSuppressResume = false;
+        safeLocationRoute.Reset();
+        territoryReturnRoute.Reset();
+
+        var session = configuration.AutoRetainerHandoff;
+        if (session is null)
+        {
+            Status = "AutoRetainer handoff canceled by manual Stop";
+            return;
+        }
+
+        if (!session.RequestIssued && clientState.IsLoggedIn && playerState.ContentId == session.OriginalContentId)
+        {
+            configuration.AutoRetainerHandoff = null;
+            configuration.Save();
+            Status = "Pending AutoRetainer handoff canceled; no provider pass was issued";
+            log.Information("Manual Stop canceled pending AutoRetainer handoff before provider dispatch.");
+            return;
+        }
+
+        if (session.ManualStopRequested)
+            return;
+
+        session.ManualStopRequested = true;
+        Fail(session, "Canceled by manual Stop; AutoRetainer has no owned-pass stop API. Verify provider is idle, then abandon or resolve recovery.");
+        log.Warning("Manual Stop canceled YAF AutoRetainer control; provider operation may remain active and will not be resumed or returned automatically.");
     }
 
     public bool Tick(AutomatorChain chain)

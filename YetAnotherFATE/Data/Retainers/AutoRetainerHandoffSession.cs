@@ -18,6 +18,7 @@ public sealed class AutoRetainerHandoffSession
     public DateTimeOffset PhaseStartedAtUtc { get; set; }
     public bool StartedByYaf { get; set; }
     public bool RequestIssued { get; set; }
+    public bool ManualStopRequested { get; set; }
     public bool ObservedAutoRetainerActive { get; set; }
     public bool CompletionEventObserved { get; set; }
     public bool SafeLocationPrepared { get; set; }

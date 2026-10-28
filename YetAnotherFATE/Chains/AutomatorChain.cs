@@ -51,6 +51,7 @@ public sealed class AutomatorChain : IDisposable
     private readonly RotatingZoneStateHandler? rotatingHandler;
     private readonly AutomatorContext context = new();
     private bool disposed;
+    private int manualStopRequested;
     private bool missingHandlerLogged;
     private int observedTravelPhaseRaw = (int)TravelPhase.Idle;
     private string? observedTravelDetail;
@@ -123,6 +124,7 @@ public sealed class AutomatorChain : IDisposable
         this.idleAetheryteReturn = idleAetheryteReturn;
         this.oceanFishingHandoff = oceanFishingHandoff;
 
+        rewardTracker.ManualStopRequested += OnManualStopRequested;
         travelController.PhaseChanged += OnTravelPhaseChanged;
     }
 
@@ -204,6 +206,12 @@ public sealed class AutomatorChain : IDisposable
     {
         if (disposed)
         {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref manualStopRequested, 0) != 0)
+        {
+            HandleManualStop();
             return;
         }
 
@@ -438,6 +446,21 @@ public sealed class AutomatorChain : IDisposable
         idleAetheryteReturn?.Reset();
     }
 
+    private void HandleManualStop()
+    {
+        configuration.AutomatorEnabled = false;
+        autoRetainerHandoff?.CancelForManualStop();
+        oceanFishingHandoff?.CancelForManualStop();
+        travelController.Cancel("Manual Stop");
+        rotatingHandler?.Reset();
+        HandleDisabledAutomator();
+        obstacleMap.ClearTemporaryMap();
+        log.Information("Manual Stop canceled YAF work and released owned blockers; unresolved provider operations remain in manual recovery.");
+    }
+
+    private void OnManualStopRequested()
+        => Interlocked.Exchange(ref manualStopRequested, 1);
+
     private void OnTravelPhaseChanged(object? sender, TravelPhaseChangedEventArgs args)
     {
         Volatile.Write(ref observedTravelPhaseRaw, (int)args.Phase);
@@ -472,6 +495,7 @@ public sealed class AutomatorChain : IDisposable
 
         HandleDisabledAutomator();
         obstacleMap.ClearTemporaryMap();
+        rewardTracker.ManualStopRequested -= OnManualStopRequested;
         travelController.PhaseChanged -= OnTravelPhaseChanged;
         disposed = true;
     }
